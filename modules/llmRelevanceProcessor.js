@@ -216,8 +216,8 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     await qdrant.upsert(POLICY_COLLECTION, { points });
   }
 
-  await supabase.from('policy_articles_metadata').insert({
-    article_id: articleId, // ← added
+const { error: metaError } = await supabase.from('policy_articles_metadata').insert({
+    article_id: articleId,
     client_id: clientId,
     industry,
     title: article.title,
@@ -227,9 +227,10 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     is_relevant: true,
     relevance_reason: classification.reason,
   });
+  if (metaError) console.error('[Storage] metadata insert error:', metaError.message);
 
-  await supabase.from('policy_articles_full').insert({
-    article_id: articleId, // ← added
+  const { error: fullError } = await supabase.from('policy_articles_full').insert({
+    article_id: articleId,
     client_id: clientId,
     industry,
     title: article.title,
@@ -244,9 +245,10 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     qdrant_collection_name: POLICY_COLLECTION,
     job_id: jobId,
   });
+  if (fullError) console.error('[Storage] full insert error:', fullError.message);
 
-  await supabase.from('policy_signals').insert({
-    article_id: articleId, // ← added
+  const { error: signalError } = await supabase.from('policy_signals').insert({
+    article_id: articleId,
     client_id: clientId,
     industry,
     source_article_url: article.url,
@@ -259,9 +261,9 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     business_impact: classification.business_impact,
     job_id: jobId,
   });
-
-  return chunks.length;
-};
+  if (signalError) console.error('[Storage] signal insert error:', signalError.message);
+  return chunks.length;  // ← add this
+};  // ← add this to close storeRelevantArticle
 
 // ── Main processing function ──────────────────────────────────────────────
 /**
