@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>KX Pipeline</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div class="container">
+    <h1>KX Pipeline</h1>
+
+    <label>Client ID</label>
+    <input type="text" id="clientId" placeholder="Enter Client ID">
+
+    <label>Industry</label>
+    <input type="text" id="industry" placeholder="e.g. Banking">
+
+    <label>Prompt Text</label>
+    <textarea id="promptText" rows="8" placeholder="Enter Exa Prompt"></textarea>
+
+    <button onclick="runPipeline()">Run Pipeline</button>
+
+    <div id="jobSection" style="display:none;">
+      <h3>Job ID</h3>
+      <p id="jobId"></p>
+    </div>
+
+<h3>Pipeline Progress</h3>
+    <pre id="statusBox">Waiting...</pre>
+  </div>
+
+  <script src="app.js"></script>
+
+</body>
+</html>
