@@ -189,9 +189,9 @@ const setupPolicyCollection = async () => {
   }
 };
 
-// ── Store a relevant article: chunk + embed + save to Qdrant and Supabase ───
 const storeRelevantArticle = async (article, classification, clientId, industry, jobId) => {
   const chunks = chunkText(article.text);
+  const articleId = uuidv4(); // ← one ID shared across Supabase + Qdrant
 
   const points = [];
   for (let i = 0; i < chunks.length; i++) {
@@ -200,6 +200,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
       id: uuidv4(),
       vector,
       payload: {
+        article_id: articleId, // ← added
         client_id: clientId,
         industry,
         title: article.title,
@@ -215,8 +216,8 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     await qdrant.upsert(POLICY_COLLECTION, { points });
   }
 
-  // Metadata table (lightweight, for frontend feed)
   await supabase.from('policy_articles_metadata').insert({
+    article_id: articleId, // ← added
     client_id: clientId,
     industry,
     title: article.title,
@@ -227,8 +228,8 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     relevance_reason: classification.reason,
   });
 
-  // Full details table
   await supabase.from('policy_articles_full').insert({
+    article_id: articleId, // ← added
     client_id: clientId,
     industry,
     title: article.title,
@@ -244,9 +245,8 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     job_id: jobId,
   });
 
-  // NEW: Structured signal record -- this is what the frontend reads from
-  // to render the Policy & Risk Monitor cards and detail panel.
   await supabase.from('policy_signals').insert({
+    article_id: articleId, // ← added
     client_id: clientId,
     industry,
     source_article_url: article.url,
