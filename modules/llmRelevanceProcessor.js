@@ -82,6 +82,7 @@ const fillPromptTemplate = (template, industry, title, text) => {
 const classifyArticle = async (promptTemplate, industry, article) => {
   const prompt = fillPromptTemplate(promptTemplate, industry, article.title, article.text);
 
+
   try {
     const response = await axios.post(LM_STUDIO_URL, {
       model: LM_STUDIO_MODEL,

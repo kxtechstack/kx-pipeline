@@ -11,6 +11,7 @@ const { filterLowQualityArticles } = require('./modules/qualityFilter');
 const { pushToProcessedQueue } = require('./modules/processedQueue');
 const { startJobTracking, updateJobStage, completeJobTracking, markFullyCompleted, failJobTracking } = require('./modules/jobStatusTracker');
 const { processQueueInBatches } = require('./modules/llmRelevanceProcessor');
+const { generateHighlight } = require('./modules/highlightGenerator');
 
 const app = express();
 app.use(cors());
@@ -154,6 +155,7 @@ const runPipeline = async (jobId, clientId, promptText, industry) => {
 
     // Step 6 - LLM relevance classification, industry flows through here too
     const llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId);
+    await generateHighlight(clientId);
 
     await updateJobStage(jobId, 'llm_processing', {
       afterLlm: llmResult.relevant,
@@ -192,6 +194,6 @@ app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
 });
 
-setInterval(() => {
-  console.log("alive...");
-}, 10000);
+//setInterval(() => {
+  //console.log("alive...");
+//}, 10000);
