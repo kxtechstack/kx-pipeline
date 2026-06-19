@@ -189,9 +189,9 @@ const setupPolicyCollection = async () => {
   }
 };
 
+// ── Store a relevant article: chunk + embed + save to Qdrant and Supabase ───
 const storeRelevantArticle = async (article, classification, clientId, industry, jobId) => {
   const chunks = chunkText(article.text);
-  const articleId = uuidv4(); // ← one ID shared across Supabase + Qdrant
 
   const points = [];
   for (let i = 0; i < chunks.length; i++) {
@@ -200,7 +200,6 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
       id: uuidv4(),
       vector,
       payload: {
-        article_id: articleId, // ← added
         client_id: clientId,
         industry,
         title: article.title,
@@ -216,8 +215,8 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     await qdrant.upsert(POLICY_COLLECTION, { points });
   }
 
-const { error: metaError } = await supabase.from('policy_articles_metadata').insert({
-    article_id: articleId,
+  // Metadata table (lightweight, for frontend feed)
+  await supabase.from('policy_articles_metadata').insert({
     client_id: clientId,
     industry,
     title: article.title,
@@ -227,10 +226,9 @@ const { error: metaError } = await supabase.from('policy_articles_metadata').ins
     is_relevant: true,
     relevance_reason: classification.reason,
   });
-  if (metaError) console.error('[Storage] metadata insert error:', metaError.message);
 
-  const { error: fullError } = await supabase.from('policy_articles_full').insert({
-    article_id: articleId,
+  // Full details table
+  await supabase.from('policy_articles_full').insert({
     client_id: clientId,
     industry,
     title: article.title,
@@ -245,10 +243,10 @@ const { error: metaError } = await supabase.from('policy_articles_metadata').ins
     qdrant_collection_name: POLICY_COLLECTION,
     job_id: jobId,
   });
-  if (fullError) console.error('[Storage] full insert error:', fullError.message);
 
-  const { error: signalError } = await supabase.from('policy_signals').insert({
-    article_id: articleId,
+  // NEW: Structured signal record -- this is what the frontend reads from
+  // to render the Policy & Risk Monitor cards and detail panel.
+  await supabase.from('policy_signals').insert({
     client_id: clientId,
     industry,
     source_article_url: article.url,
@@ -261,9 +259,9 @@ const { error: metaError } = await supabase.from('policy_articles_metadata').ins
     business_impact: classification.business_impact,
     job_id: jobId,
   });
-  if (signalError) console.error('[Storage] signal insert error:', signalError.message);
-  return chunks.length;  // ← add this
-};  // ← add this to close storeRelevantArticle
+
+  return chunks.length;
+};
 
 // ── Main processing function ──────────────────────────────────────────────
 /**
