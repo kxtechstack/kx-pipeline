@@ -9,7 +9,7 @@ const fetchFromExa = async (promptText) => {
   numResults: 100,
   type: 'auto',
   category: 'news',
-  startPublishedDate: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString()
+  startPublishedDate: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
 });
 
   console.log(`Fetched ${response.results.length} articles from Exa`);
