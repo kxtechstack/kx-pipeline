@@ -93,7 +93,7 @@ const classifyArticle = async (promptTemplate, industry, article) => {
       temperature: 0.1,
       max_tokens: 800,
     }, {
-      timeout: 100000,
+      timeout: 180000,
       headers: {
         "Content-Type": "application/json",
         "ngrok-skip-browser-warning": "true"
@@ -192,6 +192,7 @@ const setupPolicyCollection = async () => {
 // ── Store a relevant article: chunk + embed + save to Qdrant and Supabase ───
 const storeRelevantArticle = async (article, classification, clientId, industry, jobId) => {
   const chunks = chunkText(article.text);
+  const articleId = uuidv4();
 
   const points = [];
   for (let i = 0; i < chunks.length; i++) {
@@ -200,6 +201,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
       id: uuidv4(),
       vector,
       payload: {
+        article_id: articleId,
         client_id: clientId,
         industry,
         title: article.title,
@@ -215,8 +217,8 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     await qdrant.upsert(POLICY_COLLECTION, { points });
   }
 
-  // Metadata table (lightweight, for frontend feed)
-  await supabase.from('policy_articles_metadata').insert({
+  const { error: metaError } = await supabase.from('policy_articles_metadata').insert({
+    article_id: articleId,
     client_id: clientId,
     industry,
     title: article.title,
@@ -226,9 +228,10 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     is_relevant: true,
     relevance_reason: classification.reason,
   });
+  if (metaError) console.error('[Storage] metadata insert error:', metaError.message);
 
-  // Full details table
-  await supabase.from('policy_articles_full').insert({
+  const { error: fullError } = await supabase.from('policy_articles_full').insert({
+    article_id: articleId,
     client_id: clientId,
     industry,
     title: article.title,
@@ -243,10 +246,10 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     qdrant_collection_name: POLICY_COLLECTION,
     job_id: jobId,
   });
+  if (fullError) console.error('[Storage] full insert error:', fullError.message);
 
-  // NEW: Structured signal record -- this is what the frontend reads from
-  // to render the Policy & Risk Monitor cards and detail panel.
-  await supabase.from('policy_signals').insert({
+  const { error: signalError } = await supabase.from('policy_signals').insert({
+    article_id: articleId,
     client_id: clientId,
     industry,
     source_article_url: article.url,
@@ -259,6 +262,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     business_impact: classification.business_impact,
     job_id: jobId,
   });
+  if (signalError) console.error('[Storage] signal insert error:', signalError.message);
 
   return chunks.length;
 };
