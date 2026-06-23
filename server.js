@@ -14,6 +14,7 @@ const { processQueueInBatches } = require('./modules/llmRelevanceProcessor');
 const { generateHighlight } = require('./modules/highlightGenerator');
 const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
+const { askQuestion } = require('./modules/ragChat');
 
 const supabaseClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrantClient = new QdrantClient({
@@ -28,6 +29,20 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+
+app.post('/ask', async (req, res) => {
+  try {
+    const { question, clientId, industry } = req.body;
+    if (!question || !clientId || !industry) {
+      return res.status(400).json({ error: 'question, clientId, and industry are required' });
+    }
+    const result = await askQuestion(question, clientId, industry);
+    return res.json(result);
+  } catch (err) {
+    console.error('[Ask] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 // Main pipeline trigger
 app.post('/run', async (req, res) => {
