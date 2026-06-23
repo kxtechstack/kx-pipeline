@@ -114,14 +114,35 @@ app.get('/similar/:signalId', async (req, res) => {
       if (seen.has(articleId || title)) continue;
       seen.add(articleId || title);
       similar.push({
-        title,
-        url: point.payload.url,
-        score: point.score,
-      });
+          article_id: articleId,
+          title,
+          url: point.payload.url,
+          score: point.score,
+        });
       if (similar.length >= TOP_SIMILAR) break;
     }
 
-    return res.json({ similar });
+   // Fetch signal_title and signal id from policy_signals for each result
+    const articleIds = similar.map(s => s.article_id);
+    const { data: signals } = await supabaseClient
+      .from('policy_signals')
+      .select('id, signal_title, article_id')
+      .in('article_id', articleIds)
+      .eq('client_id', signal.client_id);
+
+    const signalMap = {};
+    if (signals) {
+      signals.forEach(s => { signalMap[s.article_id] = s; });
+    }
+
+    const enriched = similar.map(s => ({
+      signal_id: signalMap[s.article_id]?.id || null,
+      title: signalMap[s.article_id]?.signal_title || s.title,
+      url: s.url,
+      score: s.score,
+    }));
+
+    return res.json({ similar: enriched });
 
   } catch (err) {
     console.error('[Similar] Error:', err.message);
