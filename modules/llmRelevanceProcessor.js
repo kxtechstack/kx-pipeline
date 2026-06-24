@@ -123,7 +123,7 @@ const classifyArticle = async (promptTemplate, industry, article) => {
       // values before re-parsing.
       try {
         const repaired = cleaned.replace(
-          /"(reason|country|summary|signal_title|category|impact_level)"\s*:\s*"((?:[^"\\]|\\.)*)"/g,
+          /"(reason|country|summary|signal_title|category|impact_level|source_type)"\s*:\s*"((?:[^"\\]|\\.)*)"/g,
           (match, key, value) => {
             return `"${key}": "${value}"`;
           }
@@ -139,8 +139,9 @@ const classifyArticle = async (promptTemplate, industry, article) => {
       is_relevant: Boolean(parsed.is_relevant),
       reason: parsed.reason || 'No reason provided',
       signal_title: parsed.signal_title || article.title,
-      category: parsed.category || 'Uncategorized',
+      category: parsed.category || 'Other Regulatory Risk',
       impact_level: parsed.impact_level || 'Low',
+      source_type: parsed.source_type || 'News Report',
       country: parsed.country || 'Unknown',
       summary: parsed.summary || '',
       business_impact: Array.isArray(parsed.business_impact) ? parsed.business_impact : [],
@@ -152,10 +153,12 @@ const classifyArticle = async (promptTemplate, industry, article) => {
     // silently letting unclassified junk into the relevant dataset
     return {
       is_relevant: false,
+      technical_failure: true,
       reason: `Classification failed: ${err.message}`,
       signal_title: article.title,
-      category: 'Uncategorized',
+      category: 'Other Regulatory Risk',
       impact_level: 'Low',
+      source_type: 'News Report',
       country: 'Unknown',
       summary: '',
       business_impact: [],
@@ -257,6 +260,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     signal_title: classification.signal_title,
     category: classification.category,
     impact_level: classification.impact_level,
+    source_type: classification.source_type,
     country: classification.country,
     summary: classification.summary,
     business_impact: classification.business_impact,
