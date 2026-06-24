@@ -29,7 +29,7 @@ const askQuestion = async (question, clientId, industry) => {
   // Step 2 — search Qdrant for relevant chunks
   const searchResults = await qdrant.search(POLICY_COLLECTION, {
     vector: questionVector,
-    limit: 5,
+    limit: 8,
     filter: {
       must: [
         { key: 'client_id', match: { value: clientId } },
@@ -38,6 +38,11 @@ const askQuestion = async (question, clientId, industry) => {
     },
     with_payload: true,
   });
+  console.log('[RAG] Retrieved chunks:');
+searchResults.forEach((r, i) => {
+  console.log(`[${i+1}] Score: ${r.score.toFixed(3)} | Title: ${r.payload.title}`);
+  console.log(`     Chunk: ${r.payload.chunk_text.slice(0, 150)}`);
+});
 
   if (!searchResults || searchResults.length === 0) {
     return {
@@ -52,7 +57,7 @@ const askQuestion = async (question, clientId, industry) => {
     .join('\n\n');
 
   // Step 4 — call LM Studio
-  const prompt = `You are a policy and regulatory intelligence assistant. Answer the user's question using ONLY the policy articles provided below. If the answer is not in the articles, say "I don't have enough information to answer that from the available policy data."
+  const prompt = `You are a policy and regulatory intelligence assistant. Use the policy articles provided below to answer the user's question. Extract and summarize any relevant information from the articles even if it only partially answers the question. Only say "I don't have enough information" if the articles contain absolutely nothing related to the question."
 
 POLICY ARTICLES:
 ${context}
