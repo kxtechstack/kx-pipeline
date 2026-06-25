@@ -170,6 +170,43 @@ app.get('/similar/:signalId', async (req, res) => {
 // MAIN PIPELINE FUNCTION
 // ============================================
 
+// Latest pipeline status for a client
+app.get('/client-status/:clientId', async (req, res) => {
+  try {
+    const { data, error } = await supabaseClient
+      .from('pipeline_job_status')
+      .select('*')
+      .eq('client_id', req.params.clientId)
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error || !data) return res.json({ hasRun: false });
+
+    const lastRun = data.completed_at || data.updated_at;
+    const minutesAgo = lastRun ? Math.floor((Date.now() - new Date(lastRun)) / 60000) : null;
+
+    return res.json({
+      hasRun: true,
+      jobId: data.job_id,
+      status: data.status,
+      currentStage: data.current_stage,
+      lastRunAt: lastRun,
+      minutesAgo,
+      errorMessage: data.error_message || null,
+      counts: {
+        fetched: data.count_fetched || 0,
+        afterUrlCheck: data.count_after_url_check || 0,
+        afterTopicDedup: data.count_after_topic_dedup || 0,
+        afterQualityFilter: data.count_after_quality_filter || 0,
+        storedFinal: data.count_stored_final || 0,
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 const runPipeline = async (jobId, clientId, promptText, industry) => {
 
   try {
