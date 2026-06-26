@@ -21,6 +21,18 @@ const axios = require('axios');
 const { pullProcessedBatch, getProcessedQueueLength } = require('./processedQueue');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+// ── Log each article's processing result to Supabase ────────────────────────
+const logArticle = async (jobId, clientId, article, status, errorMessage = null) => {
+  await supabase.from('article_processing_log').insert({
+    job_id: jobId,
+    client_id: clientId,
+    article_url: article.url,
+    article_title: article.title,
+    status,
+    error_message: errorMessage,
+    processed_at: new Date().toISOString(),
+  });
+};
 const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
@@ -292,7 +304,11 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId) 
 
     const classification = await classifyArticle(promptTemplate, industry, article);
 
-    if (classification.is_relevant) {
+    if (classification.technical_failure) {
+      await logArticle(jobId, clientId, article, 'failed', classification.reason);
+      irrelevantCount++;
+      console.log(`  [!] FAILED | ${classification.reason}`);
+    } else if (classification.is_relevant) {
       const chunkCount = await storeRelevantArticle(
         article,
         classification,
@@ -300,18 +316,15 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId) 
         industry,
         jobId
       );
-
+      await logArticle(jobId, clientId, article, 'completed');
       relevantCount++;
-
       console.log(
         `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
       );
     } else {
+      await logArticle(jobId, clientId, article, 'skipped', classification.reason);
       irrelevantCount++;
-
-      console.log(
-        `  [✗] IRRELEVANT | ${classification.reason}`
-      );
+      console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
     }
 
     await sleep(DELAY_BETWEEN_CALLS_MS);
