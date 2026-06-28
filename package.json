@@ -12,6 +12,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@langchain/community": "^1.1.29",
+    "@langchain/core": "^1.2.1",
     "@qdrant/js-client-rest": "^1.18.0",
     "@supabase/supabase-js": "^2.108.1",
     "@upstash/redis": "^1.38.0",
@@ -23,6 +25,7 @@
     "express": "^5.2.1",
     "franc-min": "^6.2.0",
     "fuse.js": "^7.4.2",
+    "langchain": "^1.5.2",
     "uuid": "^14.0.0"
   }
 }

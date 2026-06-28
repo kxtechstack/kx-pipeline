@@ -45,7 +45,7 @@ const latestDate =
 
   console.log(`Found ${signals.length} signals for highlight generation`);
   const { data: promptRow, error: promptError } = await supabase
-  .from('relevance_check_prompts')
+  .from('prompts')
   .select('prompt_template')
   .eq('id', 'daily_highlight_v1')
   .eq('is_active', true)

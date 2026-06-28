@@ -4,12 +4,17 @@
  * Pulls articles from the processed Redis queue in small batches,
  * classifies each one as relevant/irrelevant via LM Studio, and for
  * relevant articles also extracts structured signal fields (title,
- * category, impact level, country, summary, business impact) in the
- * SAME LLM call -- no second call needed. Chunks + embeds the content
- * and stores everything in Qdrant + Supabase, including the new
- * policy_signals table that the frontend reads from.
+ * category, impact level, source_type, country, summary, business impact)
+ * in the SAME LLM call -- no second call needed.
  *
- * Prompt is fetched from Supabase (relevance_check_prompts table),
+ * Before storing in Qdrant, article content is:
+ *   1. Cleaned (removes URLs, ads, nav menus, junk)
+ *   2. Synthesized by LLM into its own words (avoids storing copyrighted text)
+ *
+ * Chunks + embeds the SYNTHESIZED content and stores in Qdrant.
+ * Synthesized title and body stored in Supabase — no raw original text anywhere.
+ *
+ * Prompt is fetched from Supabase (prompts table),
  * never hardcoded here.
  */
 
@@ -21,6 +26,7 @@ const axios = require('axios');
 const { pullProcessedBatch, getProcessedQueueLength } = require('./processedQueue');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
 // ── Log each article's processing result to Supabase ────────────────────────
 const logArticle = async (jobId, clientId, article, status, errorMessage = null) => {
   await supabase.from('article_processing_log').insert({
@@ -33,6 +39,7 @@ const logArticle = async (jobId, clientId, article, status, errorMessage = null)
     processed_at: new Date().toISOString(),
   });
 };
+
 const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
@@ -53,7 +60,7 @@ const TEXT_TRUNCATE_LENGTH = Number(process.env.LLM_TEXT_TRUNCATE_LENGTH) || 500
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// ── Embedding model (reused for chunking/storing relevant articles) ─────────
+// ── Embedding model ──────────────────────────────────────────────────────────
 let embedderPromise = null;
 const getEmbedder = () => {
   if (!embedderPromise) embedderPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
@@ -65,10 +72,10 @@ const embedText = async (text) => {
   return Array.from(output.data);
 };
 
-// ── Fetch the active relevance-check prompt template from Supabase ──────────
+// ── Fetch relevance prompt from Supabase ─────────────────────────────────────
 const getRelevancePromptTemplate = async () => {
   const { data, error } = await supabase
-    .from('relevance_check_prompts')
+    .from('prompts')
     .select('prompt_template')
     .eq('id', 'policy_risk_relevance_v1')
     .eq('is_active', true)
@@ -81,7 +88,7 @@ const getRelevancePromptTemplate = async () => {
   return data.prompt_template;
 };
 
-// ── Build the final prompt by filling in placeholders ───────────────────────
+// ── Fill prompt placeholders ─────────────────────────────────────────────────
 const fillPromptTemplate = (template, industry, title, text) => {
   const truncatedText = (text || '').slice(0, TEXT_TRUNCATE_LENGTH);
   return template
@@ -90,10 +97,93 @@ const fillPromptTemplate = (template, industry, title, text) => {
     .replace(/{text}/g, truncatedText);
 };
 
-// ── Call LM Studio for relevance classification + signal extraction ─────────
+// ── Clean raw article text before synthesis ──────────────────────────────────
+const cleanArticleText = (text) => {
+  if (!text) return '';
+  return text
+    .replace(/https?:\/\/[^\s]+/g, '')
+    .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '')
+    .replace(/^.{1,30}$/gm, '')
+    .replace(/share\s+on\s+(twitter|facebook|linkedin|whatsapp|email)/gi, '')
+    .replace(/(tweet|retweet|like|follow|subscribe|sign up|log in|sign in|register)/gi, '')
+    .replace(/we use cookies.{0,200}/gi, '')
+    .replace(/privacy policy.{0,100}/gi, '')
+    .replace(/(read more|click here|learn more|find out more|see more|view more).{0,50}/gi, '')
+    .replace(/\[image[^\]]*\]/gi, '')
+    .replace(/caption:.{0,100}/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+};
+
+// ── Synthesize article into LLM's own words ──────────────────────────────────
+// Returns { title, body } — both in LLM's own words, no raw text anywhere.
+const synthesizeContent = async (article, classification) => {
+  try {
+    const cleanedText = cleanArticleText(article.text || '');
+
+    const response = await axios.post(LM_STUDIO_URL, {
+      model: LM_STUDIO_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a senior regulatory intelligence analyst writing original analytical summaries. You never copy text from source articles. You always rewrite everything completely in your own words, reconstructing every sentence from scratch.',
+        },
+        {
+          role: 'user',
+          content: `You are an intelligence analyst. Read the article below and write a completely new analytical summary in your own words.
+
+First line must be: Title: [your synthesized title here]
+Then leave one blank line.
+Then write the full body summary.
+
+Article Title: ${article.title || ''}
+
+Article Content:
+${cleanedText.slice(0, TEXT_TRUNCATE_LENGTH)}
+
+STRICT RULES — you MUST follow all of these:
+1. Do NOT copy any phrase longer than 3 words from the original text
+2. Rewrite ALL statistics and numbers in different wording — e.g. "61%" becomes "more than three-fifths"
+3. Rewrite ALL direct quotes by completely changing the sentence structure
+4. Every sentence must be fully reconstructed from scratch — not minimally paraphrased
+5. Write as an analyst summarizing key findings — not as someone copying a news article
+
+Your summary must cover:
+- What happened, who was involved, and why it matters
+- Key facts, figures, and findings from the article
+- Implications and impact for professionals in this field
+- Any deadlines, requirements, or actions mentioned
+
+Write at least 300-400 words. Begin writing now:`,
+        },
+      ],
+      temperature: 0.3,
+      max_tokens: 1500,
+    }, {
+      timeout: 180000,
+      headers: {
+        'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true',
+      },
+    });
+
+    const synthesized = response.data.choices[0].message.content.trim();
+    const lines = synthesized.split('\n').filter(l => l.trim() !== '');
+    const titleLine = lines[0].replace(/^Title:\s*/i, '').trim();
+    const bodyText = lines.slice(1).join('\n').trim();
+    console.log(`  [Synthesize] Title: "${titleLine}" | Body: ${bodyText.length} chars`);
+    return { title: titleLine, body: bodyText };
+
+  } catch (err) {
+    console.log(`  [Synthesize] Failed, falling back to summary: ${err.message}`);
+    return { title: null, body: classification.summary || '' };
+  }
+};
+
+// ── Call LM Studio for relevance classification + signal extraction ──────────
 const classifyArticle = async (promptTemplate, industry, article) => {
   const prompt = fillPromptTemplate(promptTemplate, industry, article.title, article.text);
-
 
   try {
     const response = await axios.post(LM_STUDIO_URL, {
@@ -107,38 +197,24 @@ const classifyArticle = async (promptTemplate, industry, article) => {
     }, {
       timeout: 180000,
       headers: {
-        "Content-Type": "application/json",
-        "ngrok-skip-browser-warning": "true"
-      }
+        'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true',
+      },
     });
 
     const rawContent = response.data.choices[0].message.content.trim();
-
-    // Strip markdown code fences if the model wrapped the JSON in them
     let cleaned = rawContent.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-
-    // Some models occasionally add stray text before/after the JSON object,
-    // or repeat the object twice. Extract just the first {...} block to be
-    // more forgiving of this, instead of failing on the whole response.
     const jsonMatch = cleaned.match(/\{[\s\S]*?\}/);
-    if (jsonMatch) {
-      cleaned = jsonMatch[0];
-    }
+    if (jsonMatch) cleaned = jsonMatch[0];
 
     let parsed;
     try {
       parsed = JSON.parse(cleaned);
     } catch (parseErr) {
-      // Common failure: unescaped quotes inside string values, e.g.
-      // "reason": "discusses the "new" rule" breaks strict JSON.
-      // Try a lenient repair: escape quotes that appear inside string
-      // values before re-parsing.
       try {
         const repaired = cleaned.replace(
           /"(reason|country|summary|signal_title|category|impact_level|source_type)"\s*:\s*"((?:[^"\\]|\\.)*)"/g,
-          (match, key, value) => {
-            return `"${key}": "${value}"`;
-          }
+          (match, key, value) => `"${key}": "${value}"`
         );
         parsed = JSON.parse(repaired);
       } catch (repairErr) {
@@ -161,8 +237,6 @@ const classifyArticle = async (promptTemplate, industry, article) => {
 
   } catch (err) {
     console.log(`  [!] LLM classification failed for "${article.title}": ${err.message}`);
-    // Fail safe: if classification fails, mark irrelevant rather than
-    // silently letting unclassified junk into the relevant dataset
     return {
       is_relevant: false,
       technical_failure: true,
@@ -178,7 +252,7 @@ const classifyArticle = async (promptTemplate, industry, article) => {
   }
 };
 
-// ── Chunk text (simple paragraph/sentence based split) ──────────────────────
+// ── Chunk text ───────────────────────────────────────────────────────────────
 const chunkText = (text, chunkSize = CHUNK_SIZE, overlap = CHUNK_OVERLAP) => {
   if (!text) return [];
   const words = text.split(/\s+/);
@@ -192,7 +266,7 @@ const chunkText = (text, chunkSize = CHUNK_SIZE, overlap = CHUNK_OVERLAP) => {
   return chunks;
 };
 
-// ── Ensure Qdrant collection exists for relevant policy articles ────────────
+// ── Ensure Qdrant collection exists ─────────────────────────────────────────
 const setupPolicyCollection = async () => {
   const collections = await qdrant.getCollections();
   const exists = collections.collections.some(c => c.name === POLICY_COLLECTION);
@@ -204,11 +278,18 @@ const setupPolicyCollection = async () => {
   }
 };
 
-// ── Store a relevant article: chunk + embed + save to Qdrant and Supabase ───
+// ── Store relevant article ───────────────────────────────────────────────────
 const storeRelevantArticle = async (article, classification, clientId, industry, jobId) => {
-  const chunks = chunkText(article.text);
+
+  // Step 1 — Synthesize content into LLM's own words
+  // NEVER store raw copyrighted article text anywhere
+  const synthesized = await synthesizeContent(article, classification);
+  const synthesizedTitle = synthesized.title || classification.signal_title;
+  const contentToChunk = synthesized.body || classification.summary || '';
+  const chunks = chunkText(contentToChunk);
   const articleId = uuidv4();
 
+  // Step 2 — Chunk synthesized body and store in Qdrant
   const points = [];
   for (let i = 0; i < chunks.length; i++) {
     const vector = await embedText(chunks[i]);
@@ -219,7 +300,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
         article_id: articleId,
         client_id: clientId,
         industry,
-        title: article.title,
+        title: synthesizedTitle,
         url: article.url,
         chunk_index: i,
         chunk_text: chunks[i],
@@ -232,11 +313,12 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     await qdrant.upsert(POLICY_COLLECTION, { points });
   }
 
+  // Step 3 — Store metadata in Supabase (synthesized title, no raw text)
   const { error: metaError } = await supabase.from('policy_articles_metadata').insert({
     article_id: articleId,
     client_id: clientId,
     industry,
-    title: article.title,
+    title: synthesizedTitle,
     article_url: article.url,
     published_date: article.publishedDate,
     location: classification.country,
@@ -245,15 +327,16 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   });
   if (metaError) console.error('[Storage] metadata insert error:', metaError.message);
 
+  // Step 4 — Store synthesized content in Supabase (no raw original text)
   const { error: fullError } = await supabase.from('policy_articles_full').insert({
     article_id: articleId,
     client_id: clientId,
     industry,
-    title: article.title,
+    title: synthesizedTitle,
     url: article.url,
     published_date: article.publishedDate,
     author: article.author,
-    full_text: article.text,
+    full_text: contentToChunk,
     is_relevant: true,
     relevance_reason: classification.reason,
     location: classification.country,
@@ -263,6 +346,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   });
   if (fullError) console.error('[Storage] full insert error:', fullError.message);
 
+  // Step 5 — Store structured signal for frontend
   const { error: signalError } = await supabase.from('policy_signals').insert({
     article_id: articleId,
     client_id: clientId,
@@ -283,13 +367,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   return chunks.length;
 };
 
-// ── Main processing function ──────────────────────────────────────────────
-/**
- * @param {Array} articles - articles pulled from the processed Redis queue
- * @param {String} clientId
- * @param {String} industry
- * @param {String} jobId
- */
+// ── Main processing function ─────────────────────────────────────────────────
 const processArticlesForRelevance = async (articles, clientId, industry, jobId) => {
   if (!articles || articles.length === 0) return { relevant: 0, irrelevant: 0 };
 
@@ -334,17 +412,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId) 
   return { relevant: relevantCount, irrelevant: irrelevantCount };
 };
 
-/**
- * Pulls articles from the processed Redis queue in batches of 10 (destructive
- * pop, since once classified these are done and should leave the queue),
- * and runs each batch through processArticlesForRelevance.
- *
- * @param {String} queueKey - e.g. 'processed:job_12345'
- * @param {String} clientId
- * @param {String} industry
- * @param {String} jobId
- * @param {Number} batchSize - default 10
- */
+// ── Batch processing from Redis queue ───────────────────────────────────────
 async function processQueueInBatches(queueKey, clientId, industry, jobId, batchSize = LLM_BATCH_SIZE) {
   let totalRelevant = 0;
   let totalIrrelevant = 0;
