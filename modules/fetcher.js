@@ -6,7 +6,7 @@ const exa = new Exa(process.env.EXA_API_KEY);
 const fetchFromExa = async (promptText) => {
 
   const response = await exa.searchAndContents(promptText, {
-  numResults: 2,
+  numResults: 100,
   type: 'auto',
   category: 'news',
   startPublishedDate: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
