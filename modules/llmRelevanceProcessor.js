@@ -36,6 +36,7 @@ const logArticle = async (jobId, clientId, article, status, errorMessage = null)
     article_title: article.title,
     status,
     error_message: errorMessage,
+    raw_content: status === 'failed' ? JSON.stringify(article) : null,
     processed_at: new Date().toISOString(),
   });
 };

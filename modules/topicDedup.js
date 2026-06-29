@@ -29,7 +29,7 @@ const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
 
 const DEDUP_COLLECTION = 'dedup_titles';
 const VECTOR_SIZE = 384; // all-MiniLM-L6-v2 output size
-const SIMILARITY_THRESHOLD = 0.75; // cosine similarity >= this -> treat as duplicate
+const SIMILARITY_THRESHOLD = 0.78; // cosine similarity >= this -> treat as duplicate
 const RECENCY_WINDOW_DAYS = 60;
 
 const qdrant = new QdrantClient({

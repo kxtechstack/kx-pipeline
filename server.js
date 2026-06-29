@@ -207,6 +207,83 @@ app.get('/client-status/:clientId', async (req, res) => {
   }
 });
 
+// Retry failed articles
+app.post('/retry-failed/:clientId', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+
+    // Get all failed articles with retry count less than 3
+    const { data: failedArticles, error } = await supabaseClient
+      .from('article_processing_log')
+      .select('*')
+      .eq('client_id', clientId)
+      .eq('status', 'failed')
+      .lt('retry_count', 3);
+
+    if (error) return res.status(500).json({ error: error.message });
+    if (!failedArticles || failedArticles.length === 0) {
+      return res.json({ message: 'No failed articles to retry', count: 0 });
+    }
+
+    res.json({ message: `Retrying ${failedArticles.length} articles`, count: failedArticles.length });
+
+    // Process each failed article
+    for (const record of failedArticles) {
+      try {
+        if (!record.raw_content) {
+          await supabaseClient
+            .from('article_processing_log')
+            .update({ status: 'permanently_failed', error_message: 'No raw content saved for retry' })
+            .eq('id', record.id);
+          continue;
+        }
+
+        const article = JSON.parse(record.raw_content);
+
+        // Get industry from pipeline_job_status
+        const { data: job } = await supabaseClient
+          .from('pipeline_job_status')
+          .select('*')
+          .eq('job_id', record.job_id)
+          .single();
+
+        const industry = job?.industry || 'General';
+
+        // Update retry count
+        await supabaseClient
+          .from('article_processing_log')
+          .update({ retry_count: record.retry_count + 1 })
+          .eq('id', record.id);
+
+        // Re-run LLM
+        const { processArticlesForRelevance } = require('./modules/llmRelevanceProcessor');
+        const result = await processArticlesForRelevance(
+          [article], clientId, industry, record.job_id
+        );
+
+        // Update status based on result
+        if (result.relevant > 0) {
+          await supabaseClient
+            .from('article_processing_log')
+            .update({ status: 'completed', error_message: null })
+            .eq('id', record.id);
+        } else if (record.retry_count + 1 >= 3) {
+          await supabaseClient
+            .from('article_processing_log')
+            .update({ status: 'permanently_failed' })
+            .eq('id', record.id);
+        }
+
+      } catch (err) {
+        console.error(`[Retry] Failed for ${record.article_url}:`, err.message);
+      }
+    }
+
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 const runPipeline = async (jobId, clientId, promptText, industry) => {
 
   try {

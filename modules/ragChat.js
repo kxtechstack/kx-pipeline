@@ -88,7 +88,7 @@ const askQuestion = async (question, clientId, industry) => {
 
   const searchResults = await qdrant.search(POLICY_COLLECTION, {
     vector: questionVector,
-    limit: 8,
+    limit: 5,
     filter: {
       must: [
         { key: 'client_id', match: { value: clientId } },
