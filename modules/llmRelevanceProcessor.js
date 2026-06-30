@@ -89,6 +89,21 @@ const getRelevancePromptTemplate = async () => {
   return data.prompt_template;
 };
 
+const getSynthesisPromptTemplate = async () => {
+  const { data, error } = await supabase
+    .from('prompts')
+    .select('prompt_template')
+    .eq('id', 'article_synthesis_v1')
+    .eq('is_active', true)
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Could not load synthesis prompt: ${error?.message}`);
+  }
+
+  return data.prompt_template;
+};
+
 // ── Fill prompt placeholders ─────────────────────────────────────────────────
 const fillPromptTemplate = (template, industry, title, text) => {
   const truncatedText = (text || '').slice(0, TEXT_TRUNCATE_LENGTH);
@@ -122,42 +137,16 @@ const cleanArticleText = (text) => {
 const synthesizeContent = async (article, classification) => {
   try {
     const cleanedText = cleanArticleText(article.text || '');
+    const promptTemplate = await getSynthesisPromptTemplate();
+    const userPrompt = promptTemplate
+      .replace(/{title}/g, article.title || '')
+      .replace(/{text}/g, cleanedText.slice(0, TEXT_TRUNCATE_LENGTH));
 
     const response = await axios.post(LM_STUDIO_URL, {
       model: LM_STUDIO_MODEL,
       messages: [
-        {
-          role: 'system',
-          content: 'You are a senior regulatory intelligence analyst writing original analytical summaries. You never copy text from source articles. You always rewrite everything completely in your own words, reconstructing every sentence from scratch.',
-        },
-        {
-          role: 'user',
-          content: `You are an intelligence analyst. Read the article below and write a completely new analytical summary in your own words.
-
-First line must be: Title: [your synthesized title here]
-Then leave one blank line.
-Then write the full body summary.
-
-Article Title: ${article.title || ''}
-
-Article Content:
-${cleanedText.slice(0, TEXT_TRUNCATE_LENGTH)}
-
-STRICT RULES — you MUST follow all of these:
-1. Do NOT copy any phrase longer than 3 words from the original text
-2. Rewrite ALL statistics and numbers in different wording — e.g. "61%" becomes "more than three-fifths"
-3. Rewrite ALL direct quotes by completely changing the sentence structure
-4. Every sentence must be fully reconstructed from scratch — not minimally paraphrased
-5. Write as an analyst summarizing key findings — not as someone copying a news article
-
-Your summary must cover:
-- What happened, who was involved, and why it matters
-- Key facts, figures, and findings from the article
-- Implications and impact for professionals in this field
-- Any deadlines, requirements, or actions mentioned
-
-Write at least 300-400 words. Begin writing now:`,
-        },
+        { role: 'system', content: 'You are a senior regulatory intelligence analyst writing original analytical summaries. You never copy text from source articles.' },
+        { role: 'user', content: userPrompt },
       ],
       temperature: 0.3,
       max_tokens: 1500,
@@ -276,6 +265,21 @@ const setupPolicyCollection = async () => {
       vectors: { size: VECTOR_SIZE, distance: 'Cosine' },
     });
     console.log(`[LLMProcessor] Created Qdrant collection '${POLICY_COLLECTION}'`);
+  }
+
+  // Always ensure indexes exist — safe to call even if they already exist
+  const indexFields = ['article_id', 'client_id', 'industry'];
+  for (const field of indexFields) {
+    try {
+      await qdrant.createPayloadIndex(POLICY_COLLECTION, {
+        field_name: field,
+        field_schema: 'keyword',
+      });
+    } catch (err) {
+      if (!err.message.includes('already exists')) {
+        console.log(`[LLMProcessor] Index note for '${field}': ${err.message}`);
+      }
+    }
   }
 };
 

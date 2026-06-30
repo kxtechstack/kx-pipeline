@@ -97,7 +97,7 @@ const askQuestion = async (question, clientId, industry) => {
     },
     with_payload: true,
   });
-    const filteredResults = searchResults.filter(r => r.score >= 0.40);
+    const filteredResults = searchResults.filter(r => r.score >= 0.50);
 
 
   console.log('[RAG] Retrieved chunks:');
