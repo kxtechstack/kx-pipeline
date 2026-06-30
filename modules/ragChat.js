@@ -141,6 +141,11 @@ const askQuestion = async (question, clientId, industry) => {
   .replace(/^According to the articles[:,-]?\s*/i, "")
   .replace(/the articles state that\s*/gi, "")
   .replace(/Based on the retrieved context[:,-]?\s*/gi, "")
+  .replace(/\*\*(.*?)\*\*/g, '$1')
+  .replace(/\*(.*?)\*/g, '$1')
+  .replace(/#{1,6}\s/g, '')
+  .replace(/^\s*[-*]\s/gm, '• ')
+  .replace(/\n{3,}/g, '\n\n')
   .trim();
 
 
