@@ -14,10 +14,12 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const TABLE_NAME = 'pipeline_job_status';
 
 // Create the initial row when a job starts
-const startJobTracking = async (jobId, clientId, promptText) => {
+// Create the initial row when a job starts
+const startJobTracking = async (jobId, clientId, promptText, submoduleId) => {
   await supabase.from(TABLE_NAME).insert({
     job_id: jobId,
     client_id: clientId,
+    submodule_id: submoduleId,
     prompt_text: promptText,
     status: 'running',
     current_stage: 'fetching',

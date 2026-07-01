@@ -29,10 +29,11 @@ const { refreshLock } = require('./queueManager');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // ── Log each article's processing result to Supabase ────────────────────────
-const logArticle = async (jobId, clientId, article, status, errorMessage = null) => {
+const logArticle = async (jobId, clientId, article, status, errorMessage = null, submoduleId = null) => {
   await supabase.from('article_processing_log').insert({
     job_id: jobId,
     client_id: clientId,
+    submodule_id: submoduleId,
     article_url: article.url,
     article_title: article.title,
     status,
@@ -374,7 +375,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
 };
 
 // ── Main processing function ─────────────────────────────────────────────────
-const processArticlesForRelevance = async (articles, clientId, industry, jobId) => {
+const processArticlesForRelevance = async (articles, clientId, industry, jobId, submoduleId) => {
   if (!articles || articles.length === 0) return { relevant: 0, irrelevant: 0 };
 
   await setupPolicyCollection();
@@ -389,7 +390,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId) 
     const classification = await classifyArticle(promptTemplate, industry, article);
 
     if (classification.technical_failure) {
-      await logArticle(jobId, clientId, article, 'failed', classification.reason);
+      await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId);
       irrelevantCount++;
       console.log(`  [!] FAILED | ${classification.reason}`);
     } else if (classification.is_relevant) {
@@ -400,13 +401,13 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId) 
         industry,
         jobId
       );
-      await logArticle(jobId, clientId, article, 'completed');
+      await logArticle(jobId, clientId, article, 'completed', null, submoduleId);
       relevantCount++;
       console.log(
         `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
       );
     } else {
-      await logArticle(jobId, clientId, article, 'skipped', classification.reason);
+      await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId);
       irrelevantCount++;
       console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
     }
@@ -420,7 +421,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId) 
 };
 
 // ── Batch processing from Redis queue ───────────────────────────────────────
-async function processQueueInBatches(queueKey, clientId, industry, jobId, batchSize = LLM_BATCH_SIZE) {
+async function processQueueInBatches(queueKey, clientId, industry, jobId, submoduleId, batchSize = LLM_BATCH_SIZE) {
   let totalRelevant = 0;
   let totalIrrelevant = 0;
   let remaining = await getProcessedQueueLength(queueKey);
@@ -432,7 +433,7 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, batchS
     console.log(`\n[LLMProcessor] --- Batch ${batchNumber} (${remaining} remaining) ---`);
 
     const batch = await pullProcessedBatch(queueKey, batchSize);
-    const result = await processArticlesForRelevance(batch, clientId, industry, jobId);
+    const result = await processArticlesForRelevance(batch, clientId, industry, jobId, submoduleId);
 
     totalRelevant += result.relevant;
     totalIrrelevant += result.irrelevant;

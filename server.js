@@ -46,10 +46,10 @@ app.post('/ask', async (req, res) => {
 
 // Main pipeline trigger
 app.post('/run', async (req, res) => {
-  const { clientId, promptText, industry } = req.body;
+  const { clientId, promptText, industry, submoduleId } = req.body;
 
-  if (!clientId || !promptText || !industry) {
-    return res.status(400).json({ error: 'clientId, promptText, and industry are all required' });
+  if (!clientId || !promptText || !industry || !submoduleId) {
+    return res.status(400).json({ error: 'clientId, promptText, industry, and submoduleId are all required' });
   }
 
   const lockAcquired = await acquireLock(clientId);
@@ -59,7 +59,7 @@ app.post('/run', async (req, res) => {
 
   const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   res.json({ jobId, status: 'started' });
-  runPipeline(jobId, clientId, promptText, industry);
+  runPipeline(jobId, clientId, promptText, industry, submoduleId);
 });
 
 // Status check route
@@ -176,12 +176,19 @@ app.get('/similar/:signalId', async (req, res) => {
 // ============================================
 
 // Latest pipeline status for a client
+// Latest pipeline status for a client + submodule
 app.get('/client-status/:clientId', async (req, res) => {
   try {
+    const { submoduleId } = req.query;
+    if (!submoduleId) {
+      return res.status(400).json({ error: 'submoduleId query param is required' });
+    }
+
     const { data, error } = await supabaseClient
       .from('pipeline_job_status')
       .select('*')
       .eq('client_id', req.params.clientId)
+      .eq('submodule_id', submoduleId)
       .order('started_at', { ascending: false })
       .limit(1)
       .single();
@@ -263,7 +270,7 @@ app.post('/retry-failed/:clientId', async (req, res) => {
         // Re-run LLM
         const { processArticlesForRelevance } = require('./modules/llmRelevanceProcessor');
         const result = await processArticlesForRelevance(
-          [article], clientId, industry, record.job_id
+          [article], clientId, industry, record.job_id, record.submodule_id
         );
 
         // Update status based on result
@@ -289,11 +296,11 @@ app.post('/retry-failed/:clientId', async (req, res) => {
   }
 });
 
-const runPipeline = async (jobId, clientId, promptText, industry) => {
+const runPipeline = async (jobId, clientId, promptText, industry, submoduleId) => {
 
   try {
 
-    await startJobTracking(jobId, clientId, promptText);
+    await startJobTracking(jobId, clientId, promptText, submoduleId);
     await setStatus(jobId, { status: 'fetching', message: 'Calling Exa API...' });
 
     // Step 1 - Fetch from Exa
@@ -382,7 +389,7 @@ const runPipeline = async (jobId, clientId, promptText, industry) => {
     });
 
     // Step 6 - LLM relevance classification + signal extraction
-    const llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId);
+    const llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId, submoduleId);
     await generateHighlight(clientId);
 
     await updateJobStage(jobId, 'llm_processing', {
