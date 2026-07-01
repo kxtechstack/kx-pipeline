@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 
 const { fetchFromExa } = require('./modules/fetcher');
-const { sortByNewest, pushToQueue, readBatch, getQueueLength, setStatus, getStatus } = require('./modules/queueManager');
+const { sortByNewest, pushToQueue, readBatch, getQueueLength, setStatus, getStatus, acquireLock, refreshLock, releaseLock } = require('./modules/queueManager');
 const { removeUrlDuplicates } = require('./modules/deduplicator');
 const { removeSameTopicArticles } = require('./modules/topicDedup');
 const { filterLowQualityArticles } = require('./modules/qualityFilter');
@@ -52,7 +52,12 @@ app.post('/run', async (req, res) => {
     return res.status(400).json({ error: 'clientId, promptText, and industry are all required' });
   }
 
-  const jobId = `job_${Date.now()}`;
+  const lockAcquired = await acquireLock(clientId);
+  if (!lockAcquired) {
+    return res.status(409).json({ error: 'A pipeline is already running for this client. Please wait for it to finish.' });
+  }
+
+  const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   res.json({ jobId, status: 'started' });
   runPipeline(jobId, clientId, promptText, industry);
 });
@@ -407,6 +412,9 @@ const runPipeline = async (jobId, clientId, promptText, industry) => {
     console.error('Pipeline error:', error);
     await setStatus(jobId, { status: 'failed', error: error.message });
     await failJobTracking(jobId, 'unknown', error.message);
+  } finally {
+    await releaseLock(clientId);
+    console.log(`Lock released for client: ${clientId}`);
   }
 };
 

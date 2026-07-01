@@ -24,6 +24,7 @@ const { pipeline } = require('@xenova/transformers');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const { pullProcessedBatch, getProcessedQueueLength } = require('./processedQueue');
+const { refreshLock } = require('./queueManager');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -410,6 +411,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId) 
       console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
     }
 
+    await refreshLock(clientId);
     await sleep(DELAY_BETWEEN_CALLS_MS);
   }
 

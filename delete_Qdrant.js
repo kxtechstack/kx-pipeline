@@ -8,7 +8,7 @@ const client = new QdrantClient({
   checkCompatibility: false,
 });
 
-const CLIENT_ID = "b61b4d3b-caeb-457b-9971-636c83688ee4";
+const CLIENT_ID = "test_client_2";
 
 async function deleteClientData() {
   try {

@@ -77,6 +77,25 @@ const getStatus = async (jobId) => {
   return typeof data === 'string' ? JSON.parse(data) : data;
 };
 
+// Try to acquire a lock for this client. Returns true if acquired, false if already locked.
+const acquireLock = async (clientId, ttlSeconds = 3600) => {
+  const lockKey = `lock:pipeline:${clientId}`;
+  const result = await redis.set(lockKey, '1', { nx: true, ex: ttlSeconds });
+  return result !== null;
+};
+
+// Refresh the lock's expiry (called periodically while pipeline is running)
+const refreshLock = async (clientId, ttlSeconds = 3600) => {
+  const lockKey = `lock:pipeline:${clientId}`;
+  await redis.expire(lockKey, ttlSeconds);
+};
+
+// Release the lock (called when pipeline finishes, success or fail)
+const releaseLock = async (clientId) => {
+  const lockKey = `lock:pipeline:${clientId}`;
+  await redis.del(lockKey);
+};
+
 module.exports = {
   redis,
   sortByNewest,
@@ -84,5 +103,8 @@ module.exports = {
   readBatch,
   getQueueLength,
   setStatus,
-  getStatus
+  getStatus,
+  acquireLock,
+  refreshLock,
+  releaseLock
 };
