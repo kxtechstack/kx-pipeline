@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 
-const { fetchFromExa } = require('./modules/fetcher');
+const { fetchArticles } = require('./modules/fetcher');
 const { sortByNewest, pushToQueue, readBatch, getQueueLength, setStatus, getStatus, acquireLock, refreshLock, releaseLock } = require('./modules/queueManager');
 const { removeUrlDuplicates } = require('./modules/deduplicator');
 const { removeSameTopicArticles } = require('./modules/topicDedup');
@@ -46,10 +46,10 @@ app.post('/ask', async (req, res) => {
 
 // Main pipeline trigger
 app.post('/run', async (req, res) => {
-  const { clientId, promptText, industry, submoduleId } = req.body;
+  const { clientId, promptText, industry, submoduleId, source } = req.body;
 
-  if (!clientId || !promptText || !industry || !submoduleId) {
-    return res.status(400).json({ error: 'clientId, promptText, industry, and submoduleId are all required' });
+  if (!clientId || !promptText || !industry || !submoduleId || !source) {
+    return res.status(400).json({ error: 'clientId, promptText, industry, submoduleId, and source are all required' });
   }
 
   const lockAcquired = await acquireLock(clientId);
@@ -59,7 +59,7 @@ app.post('/run', async (req, res) => {
 
   const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   res.json({ jobId, status: 'started' });
-  runPipeline(jobId, clientId, promptText, industry, submoduleId);
+  runPipeline(jobId, clientId, promptText, industry, submoduleId, source);
 });
 
 // Status check route
@@ -296,16 +296,16 @@ app.post('/retry-failed/:clientId', async (req, res) => {
   }
 });
 
-const runPipeline = async (jobId, clientId, promptText, industry, submoduleId) => {
+const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, source) => {
 
   try {
 
     await startJobTracking(jobId, clientId, promptText, submoduleId);
-    await setStatus(jobId, { status: 'fetching', message: 'Calling Exa API...' });
+    await setStatus(jobId, { status: 'fetching', message: `Calling ${source} API...` });
 
-    // Step 1 - Fetch from Exa
-    const articles = await fetchFromExa(promptText);
-    console.log("\n========== PROMPT SENT TO EXA ==========\n");
+    // Step 1 - Fetch from the selected source
+    const articles = await fetchArticles(source, promptText);
+    console.log(`\n========== PROMPT SENT TO ${source.toUpperCase()} ==========\n`);
     console.log(promptText);
     console.log("Industry:", industry);
 
