@@ -1,16 +1,11 @@
 /**
  * llmRelevanceProcessor.js
  * ===========================
- * Pulls articles from the processed Redis queue in small batches.
- *
- * TWO-CALL FLOW (updated):
- *   Call 1 (classifyArticle)   — lean relevance-only check. Runs on EVERY article.
- *                                 Returns only { is_relevant, reason }.
- *   Call 2 (synthesizeContent) — only runs for articles marked relevant.
- *                                 Rewrites the article in the model's own words
- *                                 AND extracts all structured signal fields
- *                                 (title, category, impact_level, source_type,
- *                                 country, summary, business_impact) in one call.
+ * Pulls articles from the processed Redis queue in small batches,
+ * classifies each one as relevant/irrelevant via LM Studio, and for
+ * relevant articles also extracts structured signal fields (title,
+ * category, impact level, source_type, country, summary, business impact)
+ * in the SAME LLM call -- no second call needed.
  *
  * Before storing in Qdrant, article content is:
  *   1. Cleaned (removes URLs, ads, nav menus, junk)
@@ -19,7 +14,7 @@
  * Chunks + embeds the SYNTHESIZED content and stores in Qdrant.
  * Synthesized title and body stored in Supabase — no raw original text anywhere.
  *
- * Prompts are fetched from Supabase (prompts table),
+ * Prompt is fetched from Supabase (prompts table),
  * never hardcoded here.
  */
 
@@ -139,7 +134,46 @@ const cleanArticleText = (text) => {
     .trim();
 };
 
-// ── Call LM Studio for relevance classification ONLY (lean, runs on every article) ──
+// ── Synthesize article into LLM's own words ──────────────────────────────────
+// Returns { title, body } — both in LLM's own words, no raw text anywhere.
+const synthesizeContent = async (article, classification) => {
+  try {
+    const cleanedText = cleanArticleText(article.text || '');
+    const promptTemplate = await getSynthesisPromptTemplate();
+    const userPrompt = promptTemplate
+      .replace(/{title}/g, article.title || '')
+      .replace(/{text}/g, cleanedText.slice(0, TEXT_TRUNCATE_LENGTH));
+
+    const response = await axios.post(LM_STUDIO_URL, {
+      model: LM_STUDIO_MODEL,
+      messages: [
+        { role: 'system', content: 'You are a senior regulatory intelligence analyst writing original analytical summaries. You never copy text from source articles.' },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0.3,
+      max_tokens: 1500,
+    }, {
+      timeout: 180000,
+      headers: {
+        'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true',
+      },
+    });
+
+    const synthesized = response.data.choices[0].message.content.trim();
+    const lines = synthesized.split('\n').filter(l => l.trim() !== '');
+    const titleLine = lines[0].replace(/^Title:\s*/i, '').trim();
+    const bodyText = lines.slice(1).join('\n').trim();
+    console.log(`  [Synthesize] Title: "${titleLine}" | Body: ${bodyText.length} chars`);
+    return { title: titleLine, body: bodyText };
+
+  } catch (err) {
+    console.log(`  [Synthesize] Failed, falling back to summary: ${err.message}`);
+    return { title: null, body: classification.summary || '' };
+  }
+};
+
+// ── Call LM Studio for relevance classification + signal extraction ──────────
 const classifyArticle = async (promptTemplate, industry, article) => {
   const prompt = fillPromptTemplate(promptTemplate, industry, article.title, article.text);
 
@@ -151,7 +185,7 @@ const classifyArticle = async (promptTemplate, industry, article) => {
         { role: 'user', content: prompt },
       ],
       temperature: 0.1,
-      max_tokens: 150,
+      max_tokens: 800,
     }, {
       timeout: 180000,
       headers: {
@@ -165,11 +199,32 @@ const classifyArticle = async (promptTemplate, industry, article) => {
     const jsonMatch = cleaned.match(/\{[\s\S]*?\}/);
     if (jsonMatch) cleaned = jsonMatch[0];
 
-    const parsed = JSON.parse(cleaned);
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (parseErr) {
+      try {
+        const repaired = cleaned.replace(
+          /"(reason|country|summary|signal_title|category|impact_level|source_type)"\s*:\s*"((?:[^"\\]|\\.)*)"/g,
+          (match, key, value) => `"${key}": "${value}"`
+        );
+        parsed = JSON.parse(repaired);
+      } catch (repairErr) {
+        console.log(`      Raw response was: ${rawContent}`);
+        throw parseErr;
+      }
+    }
 
     return {
       is_relevant: Boolean(parsed.is_relevant),
       reason: parsed.reason || 'No reason provided',
+      signal_title: parsed.signal_title || article.title,
+      category: parsed.category || 'Other Regulatory Risk',
+      impact_level: parsed.impact_level || 'Low',
+      source_type: parsed.source_type || 'News Report',
+      country: parsed.country || 'Unknown',
+      summary: parsed.summary || '',
+      business_impact: Array.isArray(parsed.business_impact) ? parsed.business_impact : [],
     };
 
   } catch (err) {
@@ -178,98 +233,15 @@ const classifyArticle = async (promptTemplate, industry, article) => {
       is_relevant: false,
       technical_failure: true,
       reason: `Classification failed: ${err.message}`,
+      signal_title: article.title,
+      category: 'Other Regulatory Risk',
+      impact_level: 'Low',
+      source_type: 'News Report',
+      country: 'Unknown',
+      summary: '',
+      business_impact: [],
     };
   }
-};
-
-// ── Synthesize article into LLM's own words + extract ALL signal fields ──────
-// Only called for articles that passed classifyArticle. One call does both
-// the copyright-safe rewrite and the structured extraction.
-// Returns null on failure (caller treats this as a failed article).
-const callSynthesisLLM = async (userPrompt, extraWarning = '') => {
-  const response = await axios.post(LM_STUDIO_URL, {
-    model: LM_STUDIO_MODEL,
-    messages: [
-      { role: 'system', content: 'You are a senior regulatory intelligence analyst writing original analytical summaries. You never copy text from source articles. You only respond with valid JSON, nothing else.' },
-      { role: 'user', content: userPrompt + extraWarning },
-    ],
-    temperature: 0.3,
-    max_tokens: 4500,
-  }, {
-    timeout: 180000,
-    headers: {
-      'Content-Type': 'application/json',
-      'ngrok-skip-browser-warning': 'true',
-    },
-  });
-
-  const rawContent = response.data.choices[0].message.content.trim();
-  let cleaned = rawContent.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-  if (jsonMatch) cleaned = jsonMatch[0];
-
-  try {
-    return JSON.parse(cleaned);
-  } catch (err) {
-    // ── DIAGNOSTIC LOG (temporary) ─────────────────────────────────────────
-    // Shows exactly what text is around the character that broke JSON.parse,
-    // instead of just the position number. Remove once root cause is fixed.
-    const pos = Number(err.message.match(/position (\d+)/)?.[1] || 0);
-    console.log(
-      `  [Synthesize][DEBUG] JSON parse failed at char ${pos}. Context: ...` +
-      `${cleaned.slice(Math.max(0, pos - 80), pos + 80)}...`
-    );
-    throw err;
-  }
-};
-
-const synthesizeContent = async (article) => {
-  const cleanedText = cleanArticleText(article.text || '');
-
-  // ── DIAGNOSTIC LOG (temporary) ──────────────────────────────────────────
-  // Tells us where content is being lost: fetch stage, cleaning stage,
-  // truncation stage, or the LLM output itself. Remove once root cause
-  // of the short-body issue is confirmed.
-  console.log(
-    `  [Synthesize][DEBUG] Raw: ${(article.text || '').length} chars | ` +
-    `Cleaned: ${cleanedText.length} chars | ` +
-    `Sent to LLM: ${Math.min(cleanedText.length, TEXT_TRUNCATE_LENGTH)} chars`
-  );
-
-  const promptTemplate = await getSynthesisPromptTemplate();
-  const userPrompt = promptTemplate
-    .replace(/{title}/g, article.title || '')
-    .replace(/{text}/g, cleanedText.slice(0, TEXT_TRUNCATE_LENGTH));
-
-  let parsed;
-
-  try {
-    parsed = await callSynthesisLLM(userPrompt);
-  } catch (err) {
-    console.log(`  [Synthesize] First attempt failed (${err.message}), retrying with stricter formatting warning...`);
-    try {
-      parsed = await callSynthesisLLM(
-        userPrompt,
-        '\n\nIMPORTANT REMINDER: Your previous output broke JSON formatting. Do NOT use double quotation marks (") anywhere inside any field value. Use single quotes instead if you need to reference a statement. Return valid JSON only.'
-      );
-    } catch (retryErr) {
-      console.log(`  [Synthesize] Retry also failed: ${retryErr.message}`);
-      return null;
-    }
-  }
-
-  console.log(`  [Synthesize] Title: "${parsed.title}" | Body: ${(parsed.body || '').length} chars`);
-
-  return {
-    title: parsed.title || article.title,
-    body: parsed.body || '',
-    summary: parsed.summary || '',
-    category: parsed.category || 'Other Regulatory Risk',
-    impact_level: parsed.impact_level || 'Low',
-    source_type: parsed.source_type || 'News Report',
-    country: parsed.country || 'Unknown',
-    business_impact: Array.isArray(parsed.business_impact) ? parsed.business_impact : [],
-  };
 };
 
 // ── Chunk text ───────────────────────────────────────────────────────────────
@@ -314,16 +286,17 @@ const setupPolicyCollection = async () => {
 };
 
 // ── Store relevant article ───────────────────────────────────────────────────
-// classification = { is_relevant, reason } from classifyArticle
-// synthesis      = { title, body, summary, category, impact_level, source_type, country, business_impact } from synthesizeContent
-const storeRelevantArticle = async (article, classification, synthesis, clientId, industry, jobId) => {
+const storeRelevantArticle = async (article, classification, clientId, industry, jobId) => {
 
-  const synthesizedTitle = synthesis.title;
-  const contentToChunk = synthesis.body || synthesis.summary || '';
+  // Step 1 — Synthesize content into LLM's own words
+  // NEVER store raw copyrighted article text anywhere
+  const synthesized = await synthesizeContent(article, classification);
+  const synthesizedTitle = synthesized.title || classification.signal_title;
+  const contentToChunk = synthesized.body || classification.summary || '';
   const chunks = chunkText(contentToChunk);
   const articleId = uuidv4();
 
-  // Step 1 — Chunk synthesized body and store in Qdrant
+  // Step 2 — Chunk synthesized body and store in Qdrant
   const points = [];
   for (let i = 0; i < chunks.length; i++) {
     const vector = await embedText(chunks[i]);
@@ -347,7 +320,7 @@ const storeRelevantArticle = async (article, classification, synthesis, clientId
     await qdrant.upsert(POLICY_COLLECTION, { points });
   }
 
-  // Step 2 — Store metadata in Supabase (synthesized title, no raw text)
+  // Step 3 — Store metadata in Supabase (synthesized title, no raw text)
   const { error: metaError } = await supabase.from('policy_articles_metadata').insert({
     article_id: articleId,
     client_id: clientId,
@@ -355,13 +328,13 @@ const storeRelevantArticle = async (article, classification, synthesis, clientId
     title: synthesizedTitle,
     article_url: article.url,
     published_date: article.publishedDate,
-    location: synthesis.country,
+    location: classification.country,
     is_relevant: true,
     relevance_reason: classification.reason,
   });
   if (metaError) console.error('[Storage] metadata insert error:', metaError.message);
 
-  // Step 3 — Store synthesized content in Supabase (no raw original text)
+  // Step 4 — Store synthesized content in Supabase (no raw original text)
   const { error: fullError } = await supabase.from('policy_articles_full').insert({
     article_id: articleId,
     client_id: clientId,
@@ -373,27 +346,27 @@ const storeRelevantArticle = async (article, classification, synthesis, clientId
     full_text: contentToChunk,
     is_relevant: true,
     relevance_reason: classification.reason,
-    location: synthesis.country,
+    location: classification.country,
     chunk_count: chunks.length,
     qdrant_collection_name: POLICY_COLLECTION,
     job_id: jobId,
   });
   if (fullError) console.error('[Storage] full insert error:', fullError.message);
 
-  // Step 4 — Store structured signal for frontend
+  // Step 5 — Store structured signal for frontend
   const { error: signalError } = await supabase.from('policy_signals').insert({
     article_id: articleId,
     client_id: clientId,
     industry,
     source_article_url: article.url,
     source_published_date: article.publishedDate,
-    signal_title: synthesizedTitle,
-    category: synthesis.category,
-    impact_level: synthesis.impact_level,
-    source_type: synthesis.source_type,
-    country: synthesis.country,
-    summary: synthesis.summary,
-    business_impact: synthesis.business_impact,
+    signal_title: classification.signal_title,
+    category: classification.category,
+    impact_level: classification.impact_level,
+    source_type: classification.source_type,
+    country: classification.country,
+    summary: classification.summary,
+    business_impact: classification.business_impact,
     job_id: jobId,
   });
   if (signalError) console.error('[Storage] signal insert error:', signalError.message);
@@ -421,27 +394,18 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
       irrelevantCount++;
       console.log(`  [!] FAILED | ${classification.reason}`);
     } else if (classification.is_relevant) {
-      const synthesis = await synthesizeContent(article);
-
-      if (!synthesis) {
-        await logArticle(jobId, clientId, article, 'failed', 'Synthesis failed', submoduleId);
-        irrelevantCount++;
-        console.log(`  [!] FAILED at synthesis`);
-      } else {
-        const chunkCount = await storeRelevantArticle(
-          article,
-          classification,
-          synthesis,
-          clientId,
-          industry,
-          jobId
-        );
-        await logArticle(jobId, clientId, article, 'completed', null, submoduleId);
-        relevantCount++;
-        console.log(
-          `  [✓] RELEVANT (${chunkCount} chunks) | ${synthesis.category} | ${synthesis.impact_level} | ${classification.reason}`
-        );
-      }
+      const chunkCount = await storeRelevantArticle(
+        article,
+        classification,
+        clientId,
+        industry,
+        jobId
+      );
+      await logArticle(jobId, clientId, article, 'completed', null, submoduleId);
+      relevantCount++;
+      console.log(
+        `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
+      );
     } else {
       await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId);
       irrelevantCount++;

@@ -48,9 +48,11 @@ app.post('/ask', async (req, res) => {
 app.post('/run', async (req, res) => {
   const { clientId, promptText, industry, submoduleId, source } = req.body;
 
-  if (!clientId || !promptText || !industry || !submoduleId || !source) {
-    return res.status(400).json({ error: 'clientId, promptText, industry, submoduleId, and source are all required' });
+  if (!clientId || !promptText || !industry || !submoduleId) {
+    return res.status(400).json({ error: 'clientId, promptText, industry, and submoduleId are all required' });
   }
+
+  const fetchSource = source || 'Exa'; // default to Exa if caller doesn't send one
 
   const lockAcquired = await acquireLock(clientId);
   if (!lockAcquired) {
@@ -59,7 +61,7 @@ app.post('/run', async (req, res) => {
 
   const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   res.json({ jobId, status: 'started' });
-  runPipeline(jobId, clientId, promptText, industry, submoduleId, source);
+  runPipeline(jobId, clientId, promptText, industry, submoduleId, fetchSource);
 });
 
 // Status check route
@@ -301,11 +303,11 @@ const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, s
   try {
 
     await startJobTracking(jobId, clientId, promptText, submoduleId);
-    await setStatus(jobId, { status: 'fetching', message: `Calling ${source} API...` });
+    await setStatus(jobId, { status: 'fetching', message: 'Calling Exa API...' });
 
-    // Step 1 - Fetch from the selected source
+    // Step 1 - Fetch from Exa
     const articles = await fetchArticles(source, promptText);
-    console.log(`\n========== PROMPT SENT TO ${source.toUpperCase()} ==========\n`);
+    console.log("\n========== PROMPT SENT TO EXA ==========\n");
     console.log(promptText);
     console.log("Industry:", industry);
 
