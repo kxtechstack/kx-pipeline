@@ -15,6 +15,8 @@ const { generateHighlight } = require('./modules/highlightGenerator');
 const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
 const { askQuestion } = require('./modules/ragChat');
+const { extractContent } = require('./modules/customSourceExtractor');
+const { processCustomSource } = require('./modules/customSourceProcessor');
 
 const supabaseClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrantClient = new QdrantClient({
@@ -217,6 +219,45 @@ app.get('/client-status/:clientId', async (req, res) => {
       }
     });
   } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Run a single custom data source (website / pdf / file / text)
+app.post('/custom-source/run/:sourceId', async (req, res) => {
+  const { sourceId } = req.params;
+
+  try {
+    // Look up the source row
+    const { data: source, error } = await supabaseClient
+      .schema('admin')
+      .from('custom_data_sources')
+      .select('*')
+      .eq('id', sourceId)
+      .single();
+
+    if (error || !source) {
+      return res.status(404).json({ error: 'Custom data source not found' });
+    }
+
+    // Respond immediately, process in background (same pattern as /run)
+    res.json({ status: 'started', sourceId });
+
+    try {
+      const extracted = await extractContent(source);
+      const result = await processCustomSource(source, extracted);
+      console.log(`[CustomSource] Run complete for "${source.source_name}":`, result);
+    } catch (err) {
+      console.error(`[CustomSource] Run failed for "${source.source_name}":`, err.message);
+      await supabaseClient
+        .schema('admin')
+        .from('custom_data_sources')
+        .update({ last_run_status: 'failed', last_run_at: new Date().toISOString() })
+        .eq('id', sourceId);
+    }
+
+  } catch (err) {
+    console.error('[CustomSource] Route error:', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
