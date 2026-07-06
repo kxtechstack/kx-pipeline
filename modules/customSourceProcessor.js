@@ -153,11 +153,19 @@ const setupCustomCollection = async () => {
 
 // ── Mark the source row's run status ─────────────────────────────────────
 const markRunStatus = async (sourceId, status, articleId = null) => {
-  await supabase.from('custom_data_sources').update({
-    last_run_status: status,
-    last_run_at: new Date().toISOString(),
-    last_article_id: articleId,
-  }).eq('id', sourceId);
+  const { error } = await supabase
+    .schema('admin')
+    .from('custom_data_sources')
+    .update({
+      last_run_status: status,
+      last_run_at: new Date().toISOString(),
+      last_article_id: articleId,
+    })
+    .eq('id', sourceId);
+
+  if (error) {
+    console.error(`[CustomSourceProcessor] Failed to update run status for source ${sourceId}:`, error.message);
+  }
 };
 
 // ── Main entry point ──────────────────────────────────────────────────────
