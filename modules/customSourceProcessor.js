@@ -168,6 +168,22 @@ const markRunStatus = async (sourceId, status, articleId = null) => {
   }
 };
 
+// ── Log every run attempt (history, not just latest status) ─────────────
+const logRun = async (source, status, errorMessage = null, contentId = null) => {
+  const { error } = await supabase.from('custom_source_run_log').insert({
+    source_id: source.id,
+    client_id: source.client_id,
+    source_name: source.source_name,
+    status,
+    error_message: errorMessage,
+    content_id: contentId,
+  });
+
+  if (error) {
+    console.error(`[CustomSourceProcessor] Failed to write run log for source ${source.id}:`, error.message);
+  }
+};
+
 // ── Main entry point ──────────────────────────────────────────────────────
 /**
  * @param {object} source - the full row from admin.custom_data_sources
@@ -223,6 +239,7 @@ const processCustomSource = async (source, extracted) => {
 
     // Step 5 -- mark success
     await markRunStatus(source.id, 'success', contentId);
+    await logRun(source, 'success', null, contentId);
 
     console.log(`[CustomSourceProcessor] Done. Source "${source.source_name}" -> ${chunks.length} chunks stored.`);
     return { success: true, contentId, chunkCount: chunks.length };
@@ -230,6 +247,7 @@ const processCustomSource = async (source, extracted) => {
   } catch (err) {
     console.error(`[CustomSourceProcessor] Failed for source "${source.source_name}":`, err.message);
     await markRunStatus(source.id, 'failed', null);
+    await logRun(source, 'failed', err.message, null);
     return { success: false, error: err.message };
   }
 };

@@ -249,11 +249,23 @@ app.post('/custom-source/run/:sourceId', async (req, res) => {
       console.log(`[CustomSource] Run complete for "${source.source_name}":`, result);
     } catch (err) {
       console.error(`[CustomSource] Run failed for "${source.source_name}":`, err.message);
+
       await supabaseClient
         .schema('admin')
         .from('custom_data_sources')
         .update({ last_run_status: 'failed', last_run_at: new Date().toISOString() })
         .eq('id', sourceId);
+
+      // Log this failed attempt to the run history table too (this catch
+      // block covers extraction failures -- e.g. bad URL, unreachable file --
+      // which happen BEFORE processCustomSource's own try/catch would log it)
+      await supabaseClient.from('custom_source_run_log').insert({
+        source_id: sourceId,
+        client_id: source.client_id,
+        source_name: source.source_name,
+        status: 'failed',
+        error_message: err.message,
+      });
     }
 
   } catch (err) {
