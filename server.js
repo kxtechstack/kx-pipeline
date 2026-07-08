@@ -356,11 +356,11 @@ const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, s
   try {
 
     await startJobTracking(jobId, clientId, promptText, submoduleId);
-    await setStatus(jobId, { status: 'fetching', message: 'Calling Exa API...' });
+    await setStatus(jobId, { status: 'fetching', message: `Calling ${source} API...` });
 
-    // Step 1 - Fetch from Exa
+    // Step 1 - Fetch from selected source
     const articles = await fetchArticles(source, promptText);
-    console.log("\n========== PROMPT SENT TO EXA ==========\n");
+    console.log(`\n========== PROMPT SENT TO ${source.toUpperCase()} ==========\n`);
     console.log(promptText);
     console.log("Industry:", industry);
 
@@ -369,7 +369,7 @@ const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, s
 
     // Step 2 - Sort newest first
     const sorted = sortByNewest(articles);
-    console.log("\n========== FIRST 20 SORTED ARTICLES ==========\n");
+    console.log("\n========== FIRST 90 SORTED ARTICLES ==========\n");
 
     sorted.slice(0, 90).forEach((article, index) => {
       console.log(`${index + 1}. ${article.publishedDate} | ${article.title}`);
