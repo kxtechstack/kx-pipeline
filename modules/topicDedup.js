@@ -3,14 +3,16 @@
  * ==============
  * Embedding-based "same topic" duplicate detection using Qdrant.
  *
- * Replaces the old Fuse.js + entity-extraction approach with semantic
- * similarity, which works across any company/industry without
- * hardcoded word lists.
+ * Scoped by client_id + module_id (NOT submodule_id) -- same reasoning
+ * as deduplicator.js. An article judged semantically similar to one
+ * already seen under ANY submodule of a given module is treated as a
+ * duplicate for that whole module. A different module gets its own
+ * independent check.
  *
  * How it works:
- *   1. Embed the article's title using a local model (no API calls, no cost)
+ *   1. Embed the article's title + snippet using a local model (no API calls, no cost)
  *   2. Search Qdrant's "dedup_titles" collection for similar vectors,
- *      filtered by client_id and a 60-day recency window
+ *      filtered by client_id + module_id and a 60-day recency window
  *   3. If a close match is found -> it's the same story, drop it
  *   4. If not -> keep it, and immediately store its embedding in Qdrant
  *      so later articles (this batch or future runs) can be compared to it
@@ -54,10 +56,6 @@ const embedText = async (text) => {
 };
 
 // Build the text used for dedup embedding: title + a short snippet of body content.
-// Using just the title alone is too weak for short headlines worded very differently
-// about the same event. Adding the first chunk of actual article body text gives the
-// model the core facts (who, what, how much) before it drifts into boilerplate,
-// quotes, or "About the company" sections later in the article.
 const SNIPPET_LENGTH = 400;
 
 const buildEmbeddingText = (article) => {
@@ -65,8 +63,6 @@ const buildEmbeddingText = (article) => {
   let snippet = '';
 
   if (article.text) {
-    // Strip invisible zero-width/control characters (some sites embed these,
-    // likely for tracking or anti-scraping) plus excessive whitespace.
     const cleaned = article.text
       .replace(/[\u200B-\u200F\u202A-\u202E\uFEFF]/g, '')
       .replace(/\s+/g, ' ')
@@ -91,9 +87,13 @@ const setupDedupCollection = async () => {
     vectors: { size: VECTOR_SIZE, distance: 'Cosine' },
   });
 
-  // Index client_id and published_date_ts for fast filtered search
+  // Index client_id, module_id, and published_date_ts for fast filtered search
   await qdrant.createPayloadIndex(DEDUP_COLLECTION, {
     field_name: 'client_id',
+    field_schema: 'keyword',
+  });
+  await qdrant.createPayloadIndex(DEDUP_COLLECTION, {
+    field_name: 'module_id',
     field_schema: 'keyword',
   });
   await qdrant.createPayloadIndex(DEDUP_COLLECTION, {
@@ -108,9 +108,10 @@ const setupDedupCollection = async () => {
 /**
  * @param {Array} articles - articles that already passed the URL dedup check
  * @param {String} clientId
+ * @param {String} moduleId
  * @returns {Array} unique articles (same-topic duplicates removed)
  */
-const removeSameTopicArticles = async (articles, clientId) => {
+const removeSameTopicArticles = async (articles, clientId, moduleId) => {
   if (!articles || articles.length === 0) return [];
 
   await setupDedupCollection();
@@ -127,7 +128,7 @@ const removeSameTopicArticles = async (articles, clientId) => {
     const textForEmbedding = buildEmbeddingText(article);
     const vector = await embedText(textForEmbedding);
 
-    // Search Qdrant for similar titles, scoped to this client + recency window.
+    // Search Qdrant for similar titles, scoped to this client + module + recency window.
     // NOTE: using search() instead of query() here -- testing confirmed that
     // query()'s query_filter parameter is silently ignored by the installed
     // version of @qdrant/js-client-rest, causing cross-client data leakage.
@@ -138,6 +139,7 @@ const removeSameTopicArticles = async (articles, clientId) => {
       filter: {
         must: [
           { key: 'client_id', match: { value: clientId } },
+          { key: 'module_id', match: { value: moduleId } },
           { key: 'published_date_ts', range: { gte: cutoffTs } },
         ],
       },
@@ -148,15 +150,14 @@ const removeSameTopicArticles = async (articles, clientId) => {
 
     if (topMatch && topMatch.score >= SIMILARITY_THRESHOLD) {
       console.log(
-        `[DUPLICATE] score=${topMatch.score.toFixed(3)} | "${article.title}" ~ "${topMatch.payload.title}"`
+        `[DUPLICATE] module=${moduleId} score=${topMatch.score.toFixed(3)} | "${article.title}" ~ "${topMatch.payload.title}"`
       );
-      continue; // drop — same topic already seen
+      continue; // drop — same topic already seen in this module
     }
 
-    // Debug: show near-misses so threshold tuning is visible even when not flagged
     if (topMatch) {
       console.log(
-        `[no match] best score=${topMatch.score.toFixed(3)} (below ${SIMILARITY_THRESHOLD}) | "${article.title}" vs "${topMatch.payload.title}"`
+        `[no match] module=${moduleId} best score=${topMatch.score.toFixed(3)} (below ${SIMILARITY_THRESHOLD}) | "${article.title}" vs "${topMatch.payload.title}"`
       );
     }
 
@@ -174,6 +175,7 @@ const removeSameTopicArticles = async (articles, clientId) => {
           vector,
           payload: {
             client_id: clientId,
+            module_id: moduleId,
             title: article.title,
             url: article.url,
             published_date_ts: publishedTs,
@@ -183,7 +185,7 @@ const removeSameTopicArticles = async (articles, clientId) => {
     });
   }
 
-  console.log(`[TopicDedup] ${uniqueArticles.length} unique out of ${articles.length}`);
+  console.log(`[TopicDedup] module=${moduleId}: ${uniqueArticles.length} unique out of ${articles.length}`);
   return uniqueArticles;
 };
 
