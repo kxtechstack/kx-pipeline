@@ -7,7 +7,7 @@ const NINETY_DAYS_AGO = () => new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).to
 // ---------- EXA ----------
 const fetchFromExa = async (promptText) => {
   const response = await exa.searchAndContents(promptText, {
-    numResults: 2,
+    numResults: 5,
     type: 'auto',
     category: 'news',
     startPublishedDate: NINETY_DAYS_AGO()

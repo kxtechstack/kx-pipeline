@@ -84,8 +84,9 @@ const embedText = async (text) => {
 // CHANGED: New — maps module UUID → the prompt id (row in `prompts` table) to use.
 // Add a new line here whenever a new module needs its own relevance prompt.
 const MODULE_RELEVANCE_PROMPTS = {
-  '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'policy_risk_relevance_v1',      // Policy & Risk Monitor
-  '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'market_dynamics_relevance_v1', // Market Dynamics
+  '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'policy_risk_relevance_v1',
+  '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'market_dynamics_relevance_v1',
+  '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'forward_outlook_relevance_v1', // new
 };
 
 // CHANGED: getRelevancePromptTemplate now takes moduleId and looks up the
