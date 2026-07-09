@@ -6,18 +6,22 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
-const generateHighlight = async (clientId) => {
+// CHANGED: generateHighlight now takes moduleId, scoping everything below to
+// this one module only — so Policy & Risk and Market Dynamics each get their
+// own independent highlight instead of overwriting each other.
+const generateHighlight = async (clientId, moduleId) => {
 
   const { data: latestSignal } = await supabase
   .from('policy_signals')
   .select('source_published_date')
   .eq('client_id', clientId)
+  .eq('module_id', moduleId) // CHANGED: scoped to this module only
   .order('source_published_date', { ascending: false })
   .limit(1)
   .single();
 
   if (!latestSignal) {
-  console.log('No signals found');
+  console.log(`No signals found for module ${moduleId}`); // CHANGED: clarified log
   return;
 }
 
@@ -35,6 +39,7 @@ const latestDate =
     business_impact
   `)
   .eq('client_id', clientId)
+  .eq('module_id', moduleId) // CHANGED: scoped to this module only
   .gte('source_published_date', `${latestDate}T00:00:00`)
   .lt('source_published_date', `${latestDate}T23:59:59`);
 
@@ -43,7 +48,7 @@ const latestDate =
     return;
   }
 
-  console.log(`Found ${signals.length} signals for highlight generation`);
+  console.log(`Found ${signals.length} signals for highlight generation (module: ${moduleId})`); // CHANGED
   const { data: promptRow, error: promptError } = await supabase
   .from('prompts')
   .select('prompt_template')
@@ -115,22 +120,25 @@ try {
   return;
 }
 
+  // CHANGED: only delete this module's previous highlight, not all of the client's highlights
   await supabase
   .from('daily_highlights')
   .delete()
-  .eq('client_id', clientId);
+  .eq('client_id', clientId)
+  .eq('module_id', moduleId);
 
   const { error: insertError } = await supabase
     .from('daily_highlights')
     .insert({
       client_id: clientId,
-      highlight_text: highlightText
+      highlight_text: highlightText,
+      module_id: moduleId, // CHANGED: new
     });
 
   if (insertError) {
     console.error('Highlight insert error:', insertError);
   } else {
-    console.log('Highlight saved');
+    console.log(`Highlight saved (module: ${moduleId})`); // CHANGED
   }
 };
 

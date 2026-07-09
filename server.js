@@ -31,14 +31,30 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// CHANGED: New helper — looks up which module a submodule belongs to.
+// Needed anywhere we only have a submoduleId (like /retry-failed) but
+// need the moduleId too (e.g. to pick the right relevance prompt).
+const getModuleIdForSubmodule = async (submoduleId) => {
+  const { data, error } = await supabaseClient
+    .schema('admin')
+    .from('submodules')
+    .select('module_id')
+    .eq('id', submoduleId)
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Could not find module_id for submodule_id: ${submoduleId}`);
+  }
+  return data.module_id;
+};
 
 app.post('/ask', async (req, res) => {
   try {
-    const { question, clientId, industry } = req.body;
-    if (!question || !clientId || !industry) {
-      return res.status(400).json({ error: 'question, clientId, and industry are required' });
+    const { question, clientId, industry, moduleId } = req.body; // CHANGED: added moduleId
+    if (!question || !clientId || !industry || !moduleId) {
+      return res.status(400).json({ error: 'question, clientId, industry, and moduleId are required' });
     }
-    const result = await askQuestion(question, clientId, industry);
+    const result = await askQuestion(question, clientId, industry, moduleId); // CHANGED: passes moduleId
     return res.json(result);
   } catch (err) {
     console.error('[Ask] Error:', err.message);
@@ -47,23 +63,25 @@ app.post('/ask', async (req, res) => {
 });
 
 // Main pipeline trigger
+// CHANGED: now requires moduleId in the request body too, not just submoduleId
 app.post('/run', async (req, res) => {
-  const { clientId, promptText, industry, submoduleId, source } = req.body;
+  const { clientId, promptText, industry, moduleId, submoduleId, source } = req.body;
 
-  if (!clientId || !promptText || !industry || !submoduleId) {
-    return res.status(400).json({ error: 'clientId, promptText, industry, and submoduleId are all required' });
+  if (!clientId || !promptText || !industry || !moduleId || !submoduleId) {
+    return res.status(400).json({ error: 'clientId, promptText, industry, moduleId, and submoduleId are all required' });
   }
 
   const fetchSource = source || 'Exa'; // default to Exa if caller doesn't send one
 
-  const lockAcquired = await acquireLock(clientId);
+  // CHANGED: acquireLock now takes (clientId, submoduleId) — matches updated queueManager.js
+  const lockAcquired = await acquireLock(clientId, submoduleId);
   if (!lockAcquired) {
-    return res.status(409).json({ error: 'A pipeline is already running for this client. Please wait for it to finish.' });
+    return res.status(409).json({ error: 'A pipeline is already running for this client/submodule. Please wait for it to finish.' });
   }
 
   const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   res.json({ jobId, status: 'started' });
-  runPipeline(jobId, clientId, promptText, industry, submoduleId, fetchSource);
+  runPipeline(jobId, clientId, promptText, industry, moduleId, submoduleId, fetchSource); // CHANGED: passes moduleId
 });
 
 // Status check route
@@ -179,7 +197,6 @@ app.get('/similar/:signalId', async (req, res) => {
 // MAIN PIPELINE FUNCTION
 // ============================================
 
-// Latest pipeline status for a client
 // Latest pipeline status for a client + submodule
 app.get('/client-status/:clientId', async (req, res) => {
   try {
@@ -275,6 +292,8 @@ app.post('/custom-source/run/:sourceId', async (req, res) => {
 });
 
 // Retry failed articles
+// CHANGED: now looks up moduleId from the submodule (via admin.submodules),
+// since article_processing_log only stores submodule_id, not module_id.
 app.post('/retry-failed/:clientId', async (req, res) => {
   try {
     const { clientId } = req.params;
@@ -316,6 +335,9 @@ app.post('/retry-failed/:clientId', async (req, res) => {
 
         const industry = job?.industry || 'General';
 
+        // CHANGED: derive moduleId from the submodule since we only have submodule_id here
+        const moduleId = await getModuleIdForSubmodule(record.submodule_id);
+
         // Update retry count
         await supabaseClient
           .from('article_processing_log')
@@ -325,7 +347,7 @@ app.post('/retry-failed/:clientId', async (req, res) => {
         // Re-run LLM
         const { processArticlesForRelevance } = require('./modules/llmRelevanceProcessor');
         const result = await processArticlesForRelevance(
-          [article], clientId, industry, record.job_id, record.submodule_id
+          [article], clientId, industry, record.job_id, moduleId, record.submodule_id // CHANGED: added moduleId
         );
 
         // Update status based on result
@@ -351,12 +373,18 @@ app.post('/retry-failed/:clientId', async (req, res) => {
   }
 });
 
-const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, source) => {
+// CHANGED: runPipeline now takes moduleId, threads it through dedup calls
+// and processQueueInBatches. Also tracks currentStage so a crash logs the
+// REAL stage it failed at, instead of the hardcoded 'unknown' from before.
+const runPipeline = async (jobId, clientId, promptText, industry, moduleId, submoduleId, source) => {
+
+  let currentStage = 'starting'; // CHANGED: new — tracks real stage for failJobTracking
 
   try {
 
     await startJobTracking(jobId, clientId, promptText, submoduleId);
     await setStatus(jobId, { status: 'fetching', message: `Calling ${source} API...` });
+    currentStage = 'fetching'; // CHANGED
 
     // Step 1 - Fetch from selected source
     const articles = await fetchArticles(source, promptText);
@@ -384,6 +412,7 @@ const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, s
 
     await updateJobStage(jobId, 'queued', { rawQueueKey: queueKey });
     await setStatus(jobId, { status: 'queued', total: sorted.length, queueKey, message: 'Pushed to Redis raw queue' });
+    currentStage = 'queued'; // CHANGED
 
     // Step 4 - URL dedup in batches of 10
     let allCleanArticles = [];
@@ -391,9 +420,11 @@ const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, s
     const totalRawCount = await getQueueLength(queueKey);
     let startIndex = 0;
 
+    currentStage = 'url_dedup'; // CHANGED
     while (startIndex < totalRawCount) {
       const batch = await readBatch(queueKey, startIndex, 10);
-      const afterUrlCheck = await removeUrlDuplicates(batch, clientId);
+      // CHANGED: removeUrlDuplicates now scoped by moduleId, not just clientId
+      const afterUrlCheck = await removeUrlDuplicates(batch, clientId, moduleId);
       allCleanArticles.push(...afterUrlCheck);
       processedCount += batch.length;
       startIndex += 10;
@@ -414,8 +445,10 @@ const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, s
       total: sorted.length,
       message: 'Running embedding-based topic dedup check...'
     });
+    currentStage = 'topic_dedup'; // CHANGED
 
-    const finalArticles = await removeSameTopicArticles(allCleanArticles, clientId);
+    // CHANGED: removeSameTopicArticles now scoped by moduleId, not just clientId
+    const finalArticles = await removeSameTopicArticles(allCleanArticles, clientId, moduleId);
 
     // Level 3 - Quality filter
     await updateJobStage(jobId, 'topic_dedup', { afterTopicDedup: finalArticles.length });
@@ -424,6 +457,7 @@ const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, s
       total: sorted.length,
       message: 'Running quality filter (length, language, freshness)...'
     });
+    currentStage = 'quality_filter'; // CHANGED
 
     const qualityCheckedArticles = await filterLowQualityArticles(finalArticles);
 
@@ -442,10 +476,12 @@ const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, s
       processedQueueKey,
       message: `Running LLM relevance classification on ${qualityCheckedArticles.length} articles for industry: ${industry}...`
     });
+    currentStage = 'llm_processing'; // CHANGED
 
     // Step 6 - LLM relevance classification + signal extraction
-    const llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId, submoduleId);
-    await generateHighlight(clientId);
+    // CHANGED: processQueueInBatches now takes moduleId before submoduleId
+    const llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId, moduleId, submoduleId);
+    await generateHighlight(clientId, moduleId); // CHANGED: now passes moduleId
 
     await updateJobStage(jobId, 'llm_processing', {
       afterLlm: llmResult.relevant,
@@ -473,10 +509,11 @@ const runPipeline = async (jobId, clientId, promptText, industry, submoduleId, s
   } catch (error) {
     console.error('Pipeline error:', error);
     await setStatus(jobId, { status: 'failed', error: error.message });
-    await failJobTracking(jobId, 'unknown', error.message);
+    await failJobTracking(jobId, currentStage, error.message); // CHANGED: was 'unknown', now the real stage
   } finally {
-    await releaseLock(clientId);
-    console.log(`Lock released for client: ${clientId}`);
+    // CHANGED: releaseLock now takes (clientId, submoduleId) — matches updated queueManager.js
+    await releaseLock(clientId, submoduleId);
+    console.log(`Lock released for client: ${clientId}, submodule: ${submoduleId}`);
   }
 };
 

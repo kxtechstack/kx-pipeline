@@ -78,30 +78,38 @@ const setupDedupCollection = async () => {
   const collections = await qdrant.getCollections();
   const exists = collections.collections.some(c => c.name === DEDUP_COLLECTION);
 
-  if (exists) {
+  if (!exists) {
+    await qdrant.createCollection(DEDUP_COLLECTION, {
+      vectors: { size: VECTOR_SIZE, distance: 'Cosine' },
+    });
+    console.log(`[TopicDedup] Collection '${DEDUP_COLLECTION}' created.`);
+  } else {
     console.log(`[TopicDedup] Collection '${DEDUP_COLLECTION}' already exists.`);
-    return;
   }
 
-  await qdrant.createCollection(DEDUP_COLLECTION, {
-    vectors: { size: VECTOR_SIZE, distance: 'Cosine' },
-  });
+  // CHANGED: index creation now runs every time, not just on first creation.
+  // This is what was missing -- the collection already existed from before
+  // module_id was added to this file, so the index for it was never created.
+  // createPayloadIndex is safe to call even if the index already exists;
+  // we just ignore the "already exists" error.
+  const indexFields = [
+    { name: 'client_id', schema: 'keyword' },
+    { name: 'module_id', schema: 'keyword' },
+    { name: 'published_date_ts', schema: 'integer' },
+  ];
 
-  // Index client_id, module_id, and published_date_ts for fast filtered search
-  await qdrant.createPayloadIndex(DEDUP_COLLECTION, {
-    field_name: 'client_id',
-    field_schema: 'keyword',
-  });
-  await qdrant.createPayloadIndex(DEDUP_COLLECTION, {
-    field_name: 'module_id',
-    field_schema: 'keyword',
-  });
-  await qdrant.createPayloadIndex(DEDUP_COLLECTION, {
-    field_name: 'published_date_ts',
-    field_schema: 'integer',
-  });
-
-  console.log(`[TopicDedup] Collection '${DEDUP_COLLECTION}' created with indexes.`);
+  for (const field of indexFields) {
+    try {
+      await qdrant.createPayloadIndex(DEDUP_COLLECTION, {
+        field_name: field.name,
+        field_schema: field.schema,
+      });
+    } catch (err) {
+      if (!err.message.includes('already exists')) {
+        console.log(`[TopicDedup] Index note for '${field.name}': ${err.message}`);
+      }
+    }
+  }
 };
 
 // ── Main dedup function ──────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ const { BaseChatModel } = require('@langchain/core/language_models/chat_models')
 const { AIMessage } = require('@langchain/core/messages');
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const { setupPolicyCollection } = require('./llmRelevanceProcessor'); // CHANGED: new
 
 const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL,
@@ -81,7 +82,11 @@ class LMStudioChat extends BaseChatModel {
 }
 
 // ── RAG chain using LangChain ────────────────────────────────────────────────
-const askQuestion = async (question, clientId, industry) => {
+// CHANGED: askQuestion now takes moduleId and filters Qdrant search by it,
+// so chat answers on one module's tab don't pull in content from other modules.
+const askQuestion = async (question, clientId, industry, moduleId) => {
+
+  await setupPolicyCollection(); // CHANGED: ensures module_id index exists before searching
 
   // Step 1 — embed question and retrieve from Qdrant
   const questionVector = await embedText(question);
@@ -93,6 +98,7 @@ const askQuestion = async (question, clientId, industry) => {
       must: [
         { key: 'client_id', match: { value: clientId } },
         { key: 'industry', match: { value: industry } },
+        { key: 'module_id', match: { value: moduleId } }, // CHANGED: new
       ],
     },
     with_payload: true,

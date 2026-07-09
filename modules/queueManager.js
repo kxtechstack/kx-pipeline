@@ -77,22 +77,27 @@ const getStatus = async (jobId) => {
   return typeof data === 'string' ? JSON.parse(data) : data;
 };
 
-// Try to acquire a lock for this client. Returns true if acquired, false if already locked.
-const acquireLock = async (clientId, ttlSeconds = 3600) => {
-  const lockKey = `lock:pipeline:${clientId}`;
+// CHANGED: All 3 lock functions are now scoped by (clientId, submoduleId) instead
+// of just clientId. This lets different submodules of the same client run their
+// pipelines in parallel, each with its own independent lock.
+const DEFAULT_LOCK_TTL_SECONDS = 3600;
+
+// Try to acquire a lock for this client+submodule. Returns true if acquired, false if already locked.
+const acquireLock = async (clientId, submoduleId, ttlSeconds = DEFAULT_LOCK_TTL_SECONDS) => {
+  const lockKey = `lock:pipeline:${clientId}:${submoduleId}`;
   const result = await redis.set(lockKey, '1', { nx: true, ex: ttlSeconds });
   return result !== null;
 };
 
 // Refresh the lock's expiry (called periodically while pipeline is running)
-const refreshLock = async (clientId, ttlSeconds = 3600) => {
-  const lockKey = `lock:pipeline:${clientId}`;
+const refreshLock = async (clientId, submoduleId, ttlSeconds = DEFAULT_LOCK_TTL_SECONDS) => {
+  const lockKey = `lock:pipeline:${clientId}:${submoduleId}`;
   await redis.expire(lockKey, ttlSeconds);
 };
 
 // Release the lock (called when pipeline finishes, success or fail)
-const releaseLock = async (clientId) => {
-  const lockKey = `lock:pipeline:${clientId}`;
+const releaseLock = async (clientId, submoduleId) => {
+  const lockKey = `lock:pipeline:${clientId}:${submoduleId}`;
   await redis.del(lockKey);
 };
 

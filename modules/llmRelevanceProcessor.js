@@ -16,6 +16,12 @@
  *
  * Prompt is fetched from Supabase (prompts table),
  * never hardcoded here.
+ *
+ * CHANGED: Now module-aware. Every batch of articles belongs to a
+ * specific module (Policy & Risk, Market Dynamics, etc.) and submodule.
+ * The relevance prompt is picked based on moduleId, and every stored
+ * row is tagged with module_id + submodule_id so the frontend can
+ * filter by tab correctly.
  */
 
 const { createClient } = require('@supabase/supabase-js');
@@ -75,17 +81,31 @@ const embedText = async (text) => {
   return Array.from(output.data);
 };
 
-// ── Fetch relevance prompt from Supabase ─────────────────────────────────────
-const getRelevancePromptTemplate = async () => {
+// CHANGED: New — maps module UUID → the prompt id (row in `prompts` table) to use.
+// Add a new line here whenever a new module needs its own relevance prompt.
+const MODULE_RELEVANCE_PROMPTS = {
+  '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'policy_risk_relevance_v1',      // Policy & Risk Monitor
+  '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'market_dynamics_relevance_v1', // Market Dynamics
+};
+
+// CHANGED: getRelevancePromptTemplate now takes moduleId and looks up the
+// correct prompt for that module, instead of always using policy_risk_relevance_v1.
+const getRelevancePromptTemplate = async (moduleId) => {
+  const promptId = MODULE_RELEVANCE_PROMPTS[moduleId];
+
+  if (!promptId) {
+    throw new Error(`No relevance prompt mapped for module_id: ${moduleId}. Add it to MODULE_RELEVANCE_PROMPTS.`);
+  }
+
   const { data, error } = await supabase
     .from('prompts')
     .select('prompt_template')
-    .eq('id', 'policy_risk_relevance_v1')
+    .eq('id', promptId)
     .eq('is_active', true)
     .single();
 
   if (error || !data) {
-    throw new Error(`Could not load relevance prompt from Supabase: ${error?.message}`);
+    throw new Error(`Could not load relevance prompt '${promptId}' from Supabase: ${error?.message}`);
   }
 
   return data.prompt_template;
@@ -270,7 +290,7 @@ const setupPolicyCollection = async () => {
   }
 
   // Always ensure indexes exist — safe to call even if they already exist
-  const indexFields = ['article_id', 'client_id', 'industry'];
+  const indexFields = ['article_id', 'client_id', 'industry', 'module_id']; // CHANGED: added module_id
   for (const field of indexFields) {
     try {
       await qdrant.createPayloadIndex(POLICY_COLLECTION, {
@@ -286,7 +306,9 @@ const setupPolicyCollection = async () => {
 };
 
 // ── Store relevant article ───────────────────────────────────────────────────
-const storeRelevantArticle = async (article, classification, clientId, industry, jobId) => {
+// CHANGED: now takes moduleId and submoduleId, tags every insert + Qdrant payload with them
+const storeRelevantArticle = async (article, classification, clientId, industry, jobId, moduleId, submoduleId) => {
+  console.log('moduleId being inserted:', JSON.stringify(moduleId), 'length:', moduleId ? moduleId.length : 'N/A');
 
   // Step 1 — Synthesize content into LLM's own words
   // NEVER store raw copyrighted article text anywhere
@@ -312,6 +334,8 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
         chunk_index: i,
         chunk_text: chunks[i],
         published_date: article.publishedDate,
+        module_id: moduleId,       // CHANGED: new
+        submodule_id: submoduleId, // CHANGED: new
       },
     });
   }
@@ -331,6 +355,8 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     location: classification.country,
     is_relevant: true,
     relevance_reason: classification.reason,
+    module_id: moduleId,       // CHANGED: new
+    submodule_id: submoduleId, // CHANGED: new
   });
   if (metaError) console.error('[Storage] metadata insert error:', metaError.message);
 
@@ -350,6 +376,8 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     chunk_count: chunks.length,
     qdrant_collection_name: POLICY_COLLECTION,
     job_id: jobId,
+    module_id: moduleId,       // CHANGED: new
+    submodule_id: submoduleId, // CHANGED: new
   });
   if (fullError) console.error('[Storage] full insert error:', fullError.message);
 
@@ -368,6 +396,8 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     summary: classification.summary,
     business_impact: classification.business_impact,
     job_id: jobId,
+    module_id: moduleId,       // CHANGED: new
+    submodule_id: submoduleId, // CHANGED: new
   });
   if (signalError) console.error('[Storage] signal insert error:', signalError.message);
 
@@ -375,11 +405,13 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
 };
 
 // ── Main processing function ─────────────────────────────────────────────────
-const processArticlesForRelevance = async (articles, clientId, industry, jobId, submoduleId) => {
+// CHANGED: added moduleId parameter — used to pick the right relevance prompt
+// and gets passed down into storeRelevantArticle for tagging.
+const processArticlesForRelevance = async (articles, clientId, industry, jobId, moduleId, submoduleId) => {
   if (!articles || articles.length === 0) return { relevant: 0, irrelevant: 0 };
 
   await setupPolicyCollection();
-  const promptTemplate = await getRelevancePromptTemplate();
+  const promptTemplate = await getRelevancePromptTemplate(moduleId); // CHANGED: now passes moduleId
 
   let relevantCount = 0;
   let irrelevantCount = 0;
@@ -399,7 +431,9 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         classification,
         clientId,
         industry,
-        jobId
+        jobId,
+        moduleId,    // CHANGED: new
+        submoduleId  // CHANGED: new
       );
       await logArticle(jobId, clientId, article, 'completed', null, submoduleId);
       relevantCount++;
@@ -412,7 +446,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
       console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
     }
 
-    await refreshLock(clientId);
+    await refreshLock(clientId, submoduleId);
     await sleep(DELAY_BETWEEN_CALLS_MS);
   }
 
@@ -421,7 +455,8 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
 };
 
 // ── Batch processing from Redis queue ───────────────────────────────────────
-async function processQueueInBatches(queueKey, clientId, industry, jobId, submoduleId, batchSize = LLM_BATCH_SIZE) {
+// CHANGED: added moduleId parameter, threaded through to processArticlesForRelevance
+async function processQueueInBatches(queueKey, clientId, industry, jobId, moduleId, submoduleId, batchSize = LLM_BATCH_SIZE) {
   let totalRelevant = 0;
   let totalIrrelevant = 0;
   let remaining = await getProcessedQueueLength(queueKey);
@@ -433,7 +468,7 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, submod
     console.log(`\n[LLMProcessor] --- Batch ${batchNumber} (${remaining} remaining) ---`);
 
     const batch = await pullProcessedBatch(queueKey, batchSize);
-    const result = await processArticlesForRelevance(batch, clientId, industry, jobId, submoduleId);
+    const result = await processArticlesForRelevance(batch, clientId, industry, jobId, moduleId, submoduleId); // CHANGED: passes moduleId
 
     totalRelevant += result.relevant;
     totalIrrelevant += result.irrelevant;
@@ -449,4 +484,5 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, submod
 module.exports = {
   processArticlesForRelevance,
   processQueueInBatches,
+  setupPolicyCollection, // CHANGED: exported so ragChat.js can also ensure indexes exist
 };
