@@ -5,7 +5,8 @@
  * relevance call, so we never spend LLM cost/time on content that
  * wouldn't add value anyway.
  *
- * Rules (sourced from pipeline_config table in Supabase):
+ * Rules (sourced from pipeline_config table in Supabase, GLOBAL across
+ * all clients and modules -- intentionally not scoped):
  *   1. Minimum content length  -> default 200 characters
  *   2. Language                -> English only
  *   3. Article freshness       -> published within last N days (default 30)
@@ -34,11 +35,18 @@ const DEFAULT_CONFIG = {
   freshness_days: 30,
 };
 
-// ── Load quality rules from Supabase (cached per process run) ───────────────
+// ── Load quality rules from Supabase ─────────────────────────────────────
+// Previously this was cached ONCE per server process forever, which meant
+// changing pipeline_config in Supabase had no effect until the server was
+// restarted/redeployed. Now it's cached with a short TTL, so config edits
+// take effect within a few minutes without needing a restart.
 let cachedConfig = null;
+let cachedAt = 0;
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 const loadConfig = async () => {
-  if (cachedConfig) return cachedConfig;
+  const isStale = !cachedConfig || (Date.now() - cachedAt) > CACHE_TTL_MS;
+  if (!isStale) return cachedConfig;
 
   try {
     const { data, error } = await supabase
@@ -48,6 +56,7 @@ const loadConfig = async () => {
     if (error || !data || data.length === 0) {
       console.log('[QualityFilter] No config found in DB, using defaults.');
       cachedConfig = DEFAULT_CONFIG;
+      cachedAt = Date.now();
       return cachedConfig;
     }
 
@@ -59,12 +68,14 @@ const loadConfig = async () => {
     }
 
     cachedConfig = config;
+    cachedAt = Date.now();
     console.log('[QualityFilter] Loaded config from DB:', config);
     return cachedConfig;
 
   } catch (err) {
     console.log('[QualityFilter] Error loading config, using defaults:', err.message);
     cachedConfig = DEFAULT_CONFIG;
+    cachedAt = Date.now();
     return cachedConfig;
   }
 };
