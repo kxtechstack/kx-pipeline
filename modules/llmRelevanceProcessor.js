@@ -272,7 +272,7 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
         { role: 'user', content: prompt },
       ],
       temperature: 0.1,
-      max_tokens: 1500,
+      max_tokens: 2000,
     }, {
       timeout: 180000,
       headers: {
@@ -283,8 +283,28 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
 
     const rawContent = response.data.choices[0].message.content.trim();
     let cleaned = rawContent.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/); // CHANGED: greedy match, grabs to the LAST } not the first
-    if (jsonMatch) cleaned = jsonMatch[0];
+
+    // NEW: find the first balanced {...} object by counting braces,
+    // instead of guessing with regex. Handles both a missing closing
+    // brace (truncation) and an extra stray brace (model over-closing).
+    const firstBrace = cleaned.indexOf('{');
+    if (firstBrace !== -1) {
+      let depth = 0;
+      let endIndex = -1;
+      for (let i = firstBrace; i < cleaned.length; i++) {
+        if (cleaned[i] === '{') depth++;
+        else if (cleaned[i] === '}') {
+          depth--;
+          if (depth === 0) {
+            endIndex = i;
+            break;
+          }
+        }
+      }
+      if (endIndex !== -1) {
+        cleaned = cleaned.slice(firstBrace, endIndex + 1);
+      }
+    }
 
     // NEW: sanitize BEFORE any parse attempt — fixes bad unicode escapes
     // (e.g. \u00cs where 's' isn't valid hex) and raw control characters
@@ -314,8 +334,25 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
           );
           parsed = JSON.parse(repaired);
         } catch (repairErr) {
-          console.log(`      Raw response was: ${rawContent}`);
-          throw parseErr;
+          // NEW: last resort — try to repair truncated JSON by closing
+          // any unclosed strings/arrays/objects. Handles cases where the
+          // model ran out of tokens mid-response before finishing.
+          try {
+            let repaired2 = cleaned;
+            const quoteCount = (repaired2.match(/(?<!\\)"/g) || []).length;
+            if (quoteCount % 2 !== 0) repaired2 += '"';
+            const openBrackets = (repaired2.match(/\[/g) || []).length;
+            const closeBrackets = (repaired2.match(/\]/g) || []).length;
+            for (let i = 0; i < openBrackets - closeBrackets; i++) repaired2 += ']';
+            const openBraces = (repaired2.match(/\{/g) || []).length;
+            const closeBraces = (repaired2.match(/\}/g) || []).length;
+            for (let i = 0; i < openBraces - closeBraces; i++) repaired2 += '}';
+            parsed = JSON.parse(repaired2);
+            console.log(`      [Repaired truncated JSON]`);
+          } catch (finalErr) {
+            console.log(`      Raw response was: ${rawContent}`);
+            throw parseErr;
+          }
         }
       }
     }
