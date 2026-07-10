@@ -283,8 +283,16 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
 
     const rawContent = response.data.choices[0].message.content.trim();
     let cleaned = rawContent.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-    const jsonMatch = cleaned.match(/\{[\s\S]*?\}/);
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/); // CHANGED: greedy match, grabs to the LAST } not the first
     if (jsonMatch) cleaned = jsonMatch[0];
+
+    // NEW: sanitize BEFORE any parse attempt — fixes bad unicode escapes
+    // (e.g. \u00cs where 's' isn't valid hex) and raw control characters
+    // (literal newlines/tabs the model puts inside string values, which
+    // JSON doesn't allow unescaped)
+    cleaned = cleaned
+      .replace(/\\u(?![0-9a-fA-F]{4})/g, '')      // strip malformed \u escapes
+      .replace(/[\u0000-\u001F]+/g, ' ');          // replace raw control chars with a space
 
     let parsed;
     try {
