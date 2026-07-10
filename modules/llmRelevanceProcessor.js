@@ -272,7 +272,7 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
         { role: 'user', content: prompt },
       ],
       temperature: 0.1,
-      max_tokens: 800,
+      max_tokens: 1500,
     }, {
       timeout: 180000,
       headers: {
@@ -290,15 +290,25 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
     try {
       parsed = JSON.parse(cleaned);
     } catch (parseErr) {
+      // NEW: fix the "\"value\"" pattern -- some LLM responses wrap individual
+      // field values in escaped quotes (\") instead of normal quotes ("),
+      // even though the rest of the JSON object is fine. This shows up most
+      // on longer fields like "summary" and "business_impact".
       try {
-        const repaired = cleaned.replace(
-          /"(reason|country|summary|signal_title|category|impact_level|source_type)"\s*:\s*"((?:[^"\\]|\\.)*)"/g,
-          (match, key, value) => `"${key}": "${value}"`
-        );
-        parsed = JSON.parse(repaired);
-      } catch (repairErr) {
-        console.log(`      Raw response was: ${rawContent}`);
-        throw parseErr;
+        const unescaped = cleaned.replace(/\\"/g, '"');
+        parsed = JSON.parse(unescaped);
+      } catch (unescapeErr) {
+        // Fall back to your existing repair attempt
+        try {
+          const repaired = cleaned.replace(
+            /"(reason|country|summary|signal_title|category|impact_level|source_type)"\s*:\s*"((?:[^"\\]|\\.)*)"/g,
+            (match, key, value) => `"${key}": "${value}"`
+          );
+          parsed = JSON.parse(repaired);
+        } catch (repairErr) {
+          console.log(`      Raw response was: ${rawContent}`);
+          throw parseErr;
+        }
       }
     }
 

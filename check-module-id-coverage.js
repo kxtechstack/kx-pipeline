@@ -1,44 +1,52 @@
+// delete-client-module-data.js
 require('dotenv').config();
+const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
 
-const client = new QdrantClient({ url: process.env.QDRANT_URL, apiKey: process.env.QDRANT_API_KEY });
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const qdrant = new QdrantClient({ url: process.env.QDRANT_URL, apiKey: process.env.QDRANT_API_KEY, checkCompatibility: false });
 
-async function checkCoverage() {
-  const collectionName = 'policy_articles';
+const CLIENT_ID = 'b61b4d3b-caeb-457b-9971-636c83688ee4';
+const MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
+const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
 
-  let offset = undefined;
-  let total = 0;
-  let withModuleId = 0;
-  let withoutModuleId = 0;
-  const missingExamples = [];
+async function deleteAll() {
+  // 1. Delete from Qdrant
+  const qdrantResult = await qdrant.delete(POLICY_COLLECTION, {
+    filter: {
+      must: [
+        { key: 'client_id', match: { value: CLIENT_ID } },
+        { key: 'module_id', match: { value: MODULE_ID } },
+      ],
+    },
+    wait: true,
+  });
+  console.log('Qdrant delete result:', qdrantResult.status);
 
-  do {
-    const result = await client.scroll(collectionName, {
-      limit: 100,
-      offset,
-      with_payload: true,
-      with_vector: false,
-    });
+  // 2. Delete from Supabase tables
+  const tables = [
+    'policy_articles_metadata',
+    'policy_articles_full',
+    'policy_signals',
+    'processed_urls',
+    'daily_highlights',
+  ];
 
-    for (const point of result.points) {
-      total++;
-      if (point.payload && point.payload.module_id) {
-        withModuleId++;
-      } else {
-        withoutModuleId++;
-        if (missingExamples.length < 5) {
-          missingExamples.push({ id: point.id, payload: point.payload });
-        }
-      }
+  for (const table of tables) {
+    const { error, count } = await supabase
+      .from(table)
+      .delete({ count: 'exact' })
+      .eq('client_id', CLIENT_ID)
+      .eq('module_id', MODULE_ID);
+
+    if (error) {
+      console.log(`${table}: ERROR - ${error.message}`);
+    } else {
+      console.log(`${table}: deleted ${count} rows`);
     }
+  }
 
-    offset = result.next_page_offset;
-  } while (offset);
-
-  console.log('Total points:', total);
-  console.log('With module_id:', withModuleId);
-  console.log('WITHOUT module_id:', withoutModuleId);
-  console.log('Sample missing points:', JSON.stringify(missingExamples, null, 2));
+  console.log('Done.');
 }
 
-checkCoverage();
+deleteAll();
