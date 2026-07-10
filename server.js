@@ -99,6 +99,7 @@ app.get('/status/:jobId', async (req, res) => {
 app.get('/similar/:signalId', async (req, res) => {
   try {
     const { signalId } = req.params;
+    const { moduleId } = req.query;
     const TOP_SIMILAR = 3;
 
     // Step 1 — get signal from Supabase
@@ -133,15 +134,20 @@ app.get('/similar/:signalId', async (req, res) => {
     const pointId = chunksResult.points[0].id;
 
     // Step 3 — recommend API finds similar points from other articles
+    const filterConditions = [
+      { key: 'client_id', match: { value: signal.client_id } },
+      { key: 'industry', match: { value: signal.industry } },
+    ];
+    if (moduleId) {
+      filterConditions.push({ key: 'module_id', match: { value: moduleId } });
+    }
+
     const recommended = await qdrantClient.recommend(POLICY_COLLECTION, {
       positive: [pointId],
       limit: 20,
       with_payload: true,
       filter: {
-        must: [
-          { key: 'client_id', match: { value: signal.client_id } },
-          { key: 'industry', match: { value: signal.industry } },
-        ],
+        must: filterConditions,
       },
     });
 

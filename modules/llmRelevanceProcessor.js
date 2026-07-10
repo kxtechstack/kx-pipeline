@@ -22,6 +22,14 @@
  * The relevance prompt is picked based on moduleId, and every stored
  * row is tagged with module_id + submodule_id so the frontend can
  * filter by tab correctly.
+ *
+ * CHANGED (client context): For modules that need it (Market Dynamics,
+ * Forward Outlook), the client's competitors/sectors/focus areas are
+ * fetched from admin.client_icp and injected into the relevance prompt
+ * so the LLM can judge relevance against THIS client specifically,
+ * not just the industry in general. Policy & Risk is intentionally
+ * excluded — a regulation is relevant regardless of who the client's
+ * competitors are.
  */
 
 const { createClient } = require('@supabase/supabase-js');
@@ -86,8 +94,16 @@ const embedText = async (text) => {
 const MODULE_RELEVANCE_PROMPTS = {
   '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'policy_risk_relevance_v1',
   '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'market_dynamics_relevance_v1',
-  '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'forward_outlook_relevance_v1', // new
+  '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'forward_outlook_relevance_v1',
 };
+
+// NEW: Which modules should use client-specific context (competitors, sectors)
+// for relevance scoring. Policy & Risk deliberately excluded — a regulation
+// is relevant regardless of who the client's competitors are.
+const MODULES_NEEDING_CLIENT_CONTEXT = new Set([
+  '55c5ee19-bfca-468b-81b3-b89ca4f303c8', // Market Dynamics
+  '2eb989fd-0ea0-4320-b73a-f7eb8b970473', // Forward Outlook
+]);
 
 // CHANGED: getRelevancePromptTemplate now takes moduleId and looks up the
 // correct prompt for that module, instead of always using policy_risk_relevance_v1.
@@ -127,13 +143,62 @@ const getSynthesisPromptTemplate = async () => {
   return data.prompt_template;
 };
 
+// NEW: Fetches this client's competitor/sector context from admin.client_icp,
+// and formats it into a short readable text block for the LLM prompt.
+// Returns null if the client has no ICP data — callers must handle that
+// gracefully (fall back to industry-only reasoning, never crash).
+const getClientContext = async (clientId) => {
+  try {
+    const { data, error } = await supabase
+      .schema('admin')
+      .from('client_icp')
+      .select('context_json')
+      .eq('client_id', clientId)
+      .single();
+
+    if (error || !data || !data.context_json) {
+      console.log(`[ClientContext] No ICP data found for client ${clientId}, using industry-only reasoning.`);
+      return null;
+    }
+
+    const ctx = data.context_json;
+    const lines = [];
+
+    if (Array.isArray(ctx.competitors) && ctx.competitors.length > 0) {
+      lines.push(`Known competitors: ${ctx.competitors.join(', ')}`);
+    }
+    if (Array.isArray(ctx.core_sectors) && ctx.core_sectors.length > 0) {
+      lines.push(`Core sectors: ${ctx.core_sectors.join(', ')}`);
+    }
+    if (Array.isArray(ctx.focus_products_services) && ctx.focus_products_services.length > 0) {
+      lines.push(`Focus products/services: ${ctx.focus_products_services.join(', ')}`);
+    }
+    if (Array.isArray(ctx.geographic_focus) && ctx.geographic_focus.length > 0) {
+      lines.push(`Geographic focus: ${ctx.geographic_focus.join(', ')}`);
+    }
+
+    if (lines.length === 0) return null;
+
+    return lines.join('\n');
+
+  } catch (err) {
+    console.log(`[ClientContext] Error fetching context for client ${clientId}: ${err.message}. Falling back to industry-only reasoning.`);
+    return null;
+  }
+};
+
 // ── Fill prompt placeholders ─────────────────────────────────────────────────
-const fillPromptTemplate = (template, industry, title, text) => {
+// CHANGED: now accepts clientContext (optional) — inserted wherever the
+// prompt template has a {client_context} placeholder. Prompts that don't
+// have this placeholder (like Policy & Risk) are unaffected.
+const fillPromptTemplate = (template, industry, title, text, clientContext = null) => {
   const truncatedText = (text || '').slice(0, TEXT_TRUNCATE_LENGTH);
+  const contextText = clientContext || 'No specific client context available. Use industry-level reasoning only.';
   return template
     .replace(/{industry}/g, industry)
     .replace(/{title}/g, title || '')
-    .replace(/{text}/g, truncatedText);
+    .replace(/{text}/g, truncatedText)
+    .replace(/{client_context}/g, contextText);
 };
 
 // ── Clean raw article text before synthesis ──────────────────────────────────
@@ -195,8 +260,9 @@ const synthesizeContent = async (article, classification) => {
 };
 
 // ── Call LM Studio for relevance classification + signal extraction ──────────
-const classifyArticle = async (promptTemplate, industry, article) => {
-  const prompt = fillPromptTemplate(promptTemplate, industry, article.title, article.text);
+// CHANGED: now accepts clientContext, passed through to fillPromptTemplate
+const classifyArticle = async (promptTemplate, industry, article, clientContext = null) => {
+  const prompt = fillPromptTemplate(promptTemplate, industry, article.title, article.text, clientContext);
 
   try {
     const response = await axios.post(LM_STUDIO_URL, {
@@ -408,11 +474,23 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
 // ── Main processing function ─────────────────────────────────────────────────
 // CHANGED: added moduleId parameter — used to pick the right relevance prompt
 // and gets passed down into storeRelevantArticle for tagging.
+// CHANGED (client context): fetches client context once per batch, only for
+// modules in MODULES_NEEDING_CLIENT_CONTEXT, and passes it into classifyArticle.
 const processArticlesForRelevance = async (articles, clientId, industry, jobId, moduleId, submoduleId) => {
   if (!articles || articles.length === 0) return { relevant: 0, irrelevant: 0 };
 
   await setupPolicyCollection();
   const promptTemplate = await getRelevancePromptTemplate(moduleId); // CHANGED: now passes moduleId
+
+  // NEW: fetch client context once per batch (not per article) — only for
+  // modules that actually use it. Stays null for Policy & Risk.
+  let clientContext = null;
+  if (MODULES_NEEDING_CLIENT_CONTEXT.has(moduleId)) {
+    clientContext = await getClientContext(clientId);
+    if (clientContext) {
+      console.log(`[ClientContext] Loaded context for client ${clientId}:\n${clientContext}`);
+    }
+  }
 
   let relevantCount = 0;
   let irrelevantCount = 0;
@@ -420,7 +498,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   for (const article of articles) {
     console.log(`[LLMProcessor] Classifying: "${article.title}"`);
 
-    const classification = await classifyArticle(promptTemplate, industry, article);
+    const classification = await classifyArticle(promptTemplate, industry, article, clientContext); // CHANGED: passes clientContext
 
     if (classification.technical_failure) {
       await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId);
