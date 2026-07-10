@@ -312,7 +312,9 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
     // JSON doesn't allow unescaped)
     cleaned = cleaned
       .replace(/\\u(?![0-9a-fA-F]{4})/g, '')      // strip malformed \u escapes
-      .replace(/[\u0000-\u001F]+/g, ' ');          // replace raw control chars with a space
+      .replace(/[\u0000-\u001F]+/g, ' ')           // replace raw control chars with a space
+      .replace(/\]"\s*\}/g, ']}')                  // NEW: strip stray quote between closing ] and final }
+      .replace(/"\s*\}\s*\}/g, '"}');              // NEW: strip stray extra } if doubled at the very end
 
     let parsed;
     try {
