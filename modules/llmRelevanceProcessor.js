@@ -189,6 +189,74 @@ const getClientContext = async (clientId) => {
     return null;
   }
 };
+// NEW: Fetches just the sectors_to_avoid array for the deterministic override check
+const getSectorsToAvoid = async (clientId) => {
+  try {
+    const { data } = await supabase
+      .schema('admin')
+      .from('client_icp')
+      .select('context_json')
+      .eq('client_id', clientId)
+      .single();
+    return data?.context_json?.sectors_to_avoid || [];
+  } catch (err) {
+    return [];
+  }
+};
+
+// NEW: Fetches just the competitors array for the Critical-requires-competitor check
+const getCompetitorsList = async (clientId) => {
+  try {
+    const { data } = await supabase
+      .schema('admin')
+      .from('client_icp')
+      .select('context_json')
+      .eq('client_id', clientId)
+      .single();
+    return data?.context_json?.competitors || [];
+  } catch (err) {
+    return [];
+  }
+};
+
+// NEW: Deterministic safety net — since small LLMs don't reliably follow
+// the "cap impact_level at Low" instruction in the prompt, this checks
+// the classification result against the client's sectors_to_avoid list
+// in code and force-overrides impact_level if there's a match.
+const applySectorsToAvoidOverride = (classification, article, sectorsToAvoid) => {
+  if (!Array.isArray(sectorsToAvoid) || sectorsToAvoid.length === 0) return classification;
+
+  const searchText = `${article.title || ''} ${classification.signal_title || ''} ${classification.summary || ''}`.toLowerCase();
+
+  const matched = sectorsToAvoid.find(sector => searchText.includes(sector.toLowerCase()));
+
+  if (matched && classification.impact_level !== 'Low') {
+    console.log(`  [SectorsToAvoid] Overriding impact_level from ${classification.impact_level} to Low (matched: "${matched}")`);
+    return { ...classification, impact_level: 'Low' };
+  }
+
+  return classification;
+};
+// NEW: Deterministic safety net — the model sometimes marks impact_level as
+// Critical for articles that merely operate in the client's core sector,
+// without actually naming one of the client's specific listed competitors.
+// Per the prompt's own rules, Critical should be reserved for named-competitor
+// events; anything else should cap at High. This enforces that distinction.
+const applyCriticalRequiresCompetitorOverride = (classification, article, competitors) => {
+  if (!Array.isArray(competitors) || competitors.length === 0) return classification;
+  if (classification.impact_level !== 'Critical') return classification;
+
+  const searchText = `${article.title || ''} ${classification.signal_title || ''} ${classification.summary || ''}`.toLowerCase();
+
+  const matched = competitors.find(comp => searchText.includes(comp.toLowerCase()));
+
+  if (!matched) {
+    console.log(`  [CriticalCheck] Downgrading impact_level from Critical to High (no named competitor found in: ${competitors.join(', ')})`);
+    return { ...classification, impact_level: 'High' };
+  }
+
+  return classification;
+};
 
 // ── Fill prompt placeholders ─────────────────────────────────────────────────
 // CHANGED: now accepts clientContext (optional) — inserted wherever the
@@ -545,11 +613,15 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   // NEW: fetch client context once per batch (not per article) — only for
   // modules that actually use it. Stays null for Policy & Risk.
   let clientContext = null;
+  let sectorsToAvoid = [];
+  let competitors = [];
   if (MODULES_NEEDING_CLIENT_CONTEXT.has(moduleId)) {
     clientContext = await getClientContext(clientId);
     if (clientContext) {
       console.log(`[ClientContext] Loaded context for client ${clientId}:\n${clientContext}`);
     }
+    sectorsToAvoid = await getSectorsToAvoid(clientId);
+    competitors = await getCompetitorsList(clientId);
   }
 
   let relevantCount = 0;
@@ -558,7 +630,9 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   for (const article of articles) {
     console.log(`[LLMProcessor] Classifying: "${article.title}"`);
 
-    const classification = await classifyArticle(promptTemplate, industry, article, clientContext); // CHANGED: passes clientContext
+    let classification = await classifyArticle(promptTemplate, industry, article, clientContext); // CHANGED: passes clientContext
+    classification = applySectorsToAvoidOverride(classification, article, sectorsToAvoid);
+    classification = applyCriticalRequiresCompetitorOverride(classification, article, competitors);
 
     if (classification.technical_failure) {
       await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId);
@@ -624,4 +698,7 @@ module.exports = {
   processArticlesForRelevance,
   processQueueInBatches,
   setupPolicyCollection, // CHANGED: exported so ragChat.js can also ensure indexes exist
+  classifyArticle,       // TEMP: exported for manual testing
+  getClientContext,      // TEMP: exported for manual testing
+  getRelevancePromptTemplate, // TEMP: exported for manual testing
 };
