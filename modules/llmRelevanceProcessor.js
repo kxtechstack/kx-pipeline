@@ -176,6 +176,9 @@ const getClientContext = async (clientId) => {
     if (Array.isArray(ctx.geographic_focus) && ctx.geographic_focus.length > 0) {
       lines.push(`Geographic focus: ${ctx.geographic_focus.join(', ')}`);
     }
+    if (Array.isArray(ctx.sectors_to_avoid) && ctx.sectors_to_avoid.length > 0) { // NEW
+      lines.push(`Lower priority / not core focus for this client: ${ctx.sectors_to_avoid.join(', ')}`);
+    }
 
     if (lines.length === 0) return null;
 
