@@ -701,4 +701,9 @@ module.exports = {
   classifyArticle,       // TEMP: exported for manual testing
   getClientContext,      // TEMP: exported for manual testing
   getRelevancePromptTemplate, // TEMP: exported for manual testing
+  fillPromptTemplate,        // TEMP: exported for Gemini comparison script
+  getSectorsToAvoid,         // TEMP: exported for Gemini comparison script
+  getCompetitorsList,        // TEMP: exported for Gemini comparison script
+  applySectorsToAvoidOverride,             // TEMP: exported for Gemini comparison script
+  applyCriticalRequiresCompetitorOverride, // TEMP: exported for Gemini comparison script
 };

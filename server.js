@@ -47,7 +47,30 @@ const getModuleIdForSubmodule = async (submoduleId) => {
   }
   return data.module_id;
 };
+app.post('/admin/invite-user', async (req, res) => {
+  const { email, clientId, role } = req.body;
 
+  if (!email || !clientId) {
+    return res.status(400).json({ error: 'email and clientId are required' });
+  }
+
+  try {
+    const { data, error } = await supabaseClient.auth.admin.inviteUserByEmail(email, {
+      redirectTo: 'https://YOUR-DASHBOARD-URL.com/',
+      data: { client_id: clientId, role: role || 'client_user' }
+    });
+
+    if (error) {
+      console.error('[InviteUser] Supabase error:', error.message);
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json({ message: 'Invite sent', user: data.user });
+  } catch (err) {
+    console.error('[InviteUser] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 app.post('/ask', async (req, res) => {
   try {
     const { question, clientId, industry, moduleId } = req.body; // CHANGED: added moduleId
