@@ -48,7 +48,7 @@ const getModuleIdForSubmodule = async (submoduleId) => {
   return data.module_id;
 };
 app.post('/admin/invite-user', async (req, res) => {
-  const { email, clientId, role } = req.body;
+  const { email, clientId, firstName, lastName, designation } = req.body;
 
   if (!email || !clientId) {
     return res.status(400).json({ error: 'email and clientId are required' });
@@ -56,13 +56,29 @@ app.post('/admin/invite-user', async (req, res) => {
 
   try {
     const { data, error } = await supabaseClient.auth.admin.inviteUserByEmail(email, {
-      redirectTo: 'https://YOUR-DASHBOARD-URL.com/',
-      data: { client_id: clientId, role: role || 'client_user' }
+      redirectTo: 'https://pwdlogin.sneha-9a1.workers.dev/',
+      data: { client_id: clientId }
     });
 
     if (error) {
       console.error('[InviteUser] Supabase error:', error.message);
       return res.status(400).json({ error: error.message });
+    }
+
+    const { error: insertError } = await supabaseClient
+      .schema('admin')
+      .from('client_users')
+      .insert({
+        email: email.toLowerCase(),
+        client_id: clientId,
+        first_name: firstName || null,
+        last_name: lastName || null,
+        designation: designation || null,
+        is_active: true
+      });
+
+    if (insertError) {
+      console.error('[InviteUser] client_users insert error:', insertError.message);
     }
 
     return res.json({ message: 'Invite sent', user: data.user });
@@ -71,6 +87,7 @@ app.post('/admin/invite-user', async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
 app.post('/ask', async (req, res) => {
   try {
     const { question, clientId, industry, moduleId } = req.body; // CHANGED: added moduleId
