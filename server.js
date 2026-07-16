@@ -56,7 +56,7 @@ app.post('/admin/invite-user', async (req, res) => {
 
   try {
     const { data, error } = await supabaseClient.auth.admin.inviteUserByEmail(email, {
-      redirectTo: 'https://pwdcheck.sneha-9a1.workers.dev/',
+      redirectTo: 'https://market-intelligence-dashboard.techstack-d48.workers.dev/',
       data: { client_id: clientId }
     });
 
