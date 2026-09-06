@@ -168,13 +168,15 @@ console.log(`Total signals to process: ${ordered.length}\n`);
     const bucket = (cardsBySubmodule[sig.submodule] ||= []);
     const orgKey = `${sig.submodule}::${sig.organization}`;
 
+    const orgSignalKey = `${sig.submodule}::${sig.organization}::${sig.signalId}`;
+
     let chosen = null;
     let matchType = null;
     let score = null;
 
-    // TIER 1 — exact org match
-    if (sig.organization && orgLastCard[orgKey]) {
-      chosen = orgLastCard[orgKey];
+    // TIER 1 — exact org match, scoped to the same signal_id
+    if (sig.organization && orgLastCard[orgSignalKey]) {
+      chosen = orgLastCard[orgSignalKey];
       matchType = 'TIER1-org';
     }
 
@@ -206,7 +208,7 @@ console.log(`Total signals to process: ${ordered.length}\n`);
       log.push({ title: sig.title, group: sig.group, org: sig.organization, action: 'NEW CARD', cardId: card.id, score: null, matchType: null });
     }
 
-    orgLastCard[orgKey] = chosen || bucket[bucket.length - 1];
+    orgLastCard[orgSignalKey] = chosen || bucket[bucket.length - 1];
   }
 
   console.log('=== DECISION LOG ===\n');
