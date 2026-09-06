@@ -39,7 +39,7 @@ const cosineSimilarity = (a, b) => {
 // Deliberately strict -- this is what stops "same sentence template,
 // different company" false merges. Same-company matching below never uses
 // this at all, so it can never block a same-company merge.
-const CARD_SIMILARITY_THRESHOLD = 0.82;
+const CARD_SIMILARITY_THRESHOLD = 0.90;
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
