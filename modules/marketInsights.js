@@ -366,45 +366,10 @@ const calculateRelevanceLevel = (signalCount) => {
 // about the same real event classified under slightly different
 // signals can still find each other.
 const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbedding, organization) => {
-  const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
-    vector: articleEmbedding,
-    filter: {
-      must: [
-        { key: 'client_id', match: { value: clientId } },
-        { key: 'module_id', match: { value: moduleId } },
-        { key: 'submodule_id', match: { value: submoduleId } },
-      ],
-    },
-    limit: 1,
-    with_payload: true,
-  });
-
-  const bestMatch = searchResult[0];
-
-  if (bestMatch) {
-    const { count: memberCount } = await supabase
-      .from('market_insight_members')
-      .select('*', { count: 'exact', head: true })
-      .eq('insight_id', bestMatch.payload.insight_id);
-
-    console.log(`  [CardMatch] score=${bestMatch.score.toFixed(3)} threshold=${CARD_SIMILARITY_THRESHOLD} card=${bestMatch.payload.insight_id} existing_members=${memberCount}`);
-
-    if (bestMatch.score >= CARD_SIMILARITY_THRESHOLD) {
-      const { data: card } = await supabase
-        .from('market_insights')
-        .select('*')
-        .eq('id', bestMatch.payload.insight_id)
-        .single();
-      if (card) return card;
-    }
-  } else {
-    console.log(`  [CardMatch] No existing cards to compare against yet`);
-  }
-
-  // Embedding match didn't clear the threshold — fall back to an exact
-  // organization match within scope. Guarantees the SAME company's
-  // signals always land on one card even when phrasing varies enough
-  // to dodge the embedding threshold.
+  // Priority 1 — if this organization already has a card in scope, always
+  // use it. Checked BEFORE embedding search so a same-company signal can
+  // never get hijacked by an unrelated card that happens to score higher
+  // on shared boilerplate wording.
   if (organization && organization !== 'Unknown') {
     const { data: orgSignal } = await supabase
       .from('market_dynamics_signals')
@@ -425,13 +390,51 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbed
         .eq('id', orgSignal.insight_id)
         .single();
       if (card) {
-        console.log(`  [CardMatch] No embedding match, but found org match for "${organization}" -> card ${card.id}`);
+        console.log(`  [CardMatch] Org match for "${organization}" -> card ${card.id}`);
         return card;
       }
     }
   }
 
-  return null;
+  // Priority 2 — no card for this organization yet: fall back to
+  // embedding similarity, which is what lets different companies with a
+  // shared theme still land on one card together.
+  const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
+    vector: articleEmbedding,
+    filter: {
+      must: [
+        { key: 'client_id', match: { value: clientId } },
+        { key: 'module_id', match: { value: moduleId } },
+        { key: 'submodule_id', match: { value: submoduleId } },
+      ],
+    },
+    limit: 1,
+    with_payload: true,
+  });
+
+  const bestMatch = searchResult[0];
+
+  if (!bestMatch) {
+    console.log(`  [CardMatch] No existing cards to compare against yet`);
+    return null;
+  }
+
+  const { count: memberCount } = await supabase
+    .from('market_insight_members')
+    .select('*', { count: 'exact', head: true })
+    .eq('insight_id', bestMatch.payload.insight_id);
+
+  console.log(`  [CardMatch] score=${bestMatch.score.toFixed(3)} threshold=${CARD_SIMILARITY_THRESHOLD} card=${bestMatch.payload.insight_id} existing_members=${memberCount}`);
+
+  if (bestMatch.score < CARD_SIMILARITY_THRESHOLD) return null;
+
+  const { data: card } = await supabase
+    .from('market_insights')
+    .select('*')
+    .eq('id', bestMatch.payload.insight_id)
+    .single();
+
+  return card || null;
 };
 
 // Step 2 — ask the LLM to write (or rewrite) the card.
