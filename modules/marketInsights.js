@@ -25,17 +25,15 @@ const embedText = async (text) => {
   return Array.from(output.data);
 };
 
-const cosineSimilarity = (a, b) => {
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-};
-
-const CARD_SIMILARITY_THRESHOLD = 0.68;
+// RAISED from 0.68 -> 0.78. This is the single lever that controls
+// "how similar do two articles need to be before they're treated as
+// the same topic". Too low and boilerplate-y phrasing (e.g. two
+// different companies' funding announcements that both say "closed a
+// $X million Series A led by Y") merges when it shouldn't. Too high
+// and genuinely related articles about the same topic stop merging.
+// Tune this ONE number if you see either problem in real usage —
+// don't reintroduce org/company logic to compensate.
+const CARD_SIMILARITY_THRESHOLD = 0.78;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const setupInsightCentroidCollection = async () => {
@@ -65,16 +63,13 @@ const setupInsightCentroidCollection = async () => {
 };
 
 // ── Compute and store a card's centroid ──────────────────────────────────────
-// Mirrors updateTrendCentroid() in trendClustering.js. Called whenever a
-// card is created or enriched (a new article joins it). Averages the
-// embeddings of every article currently linked to this card via
-// market_insight_members, and upserts that average vector as the card's
-// centroid in market_insights_centroids.
+// Averages the embeddings of every article currently linked to this card
+// via market_insight_members, and upserts that average vector as the
+// card's centroid. This is the ONLY thing that defines "what topic is
+// this card about" — no company/org logic anywhere in this file.
 const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
 
 const updateInsightCentroid = async (insightId) => {
-  // Step 1 — get the card's own metadata (client_id, module_id, industry,
-  // existing centroid_point_id if any)
   const { data: insight, error } = await supabase
     .from('market_insights')
     .select('client_id, module_id, submodule_id, centroid_point_id')
@@ -86,7 +81,6 @@ const updateInsightCentroid = async (insightId) => {
     return;
   }
 
-  // market_insights has no industry column — look it up from the client record
   const { data: clientRow, error: clientError } = await supabase
     .schema('admin')
     .from('clients')
@@ -101,7 +95,6 @@ const updateInsightCentroid = async (insightId) => {
 
   const industry = clientRow.industry;
 
-  // Step 2 — get every article_id linked to this card
   const { data: members, error: membersError } = await supabase
     .from('market_insight_members')
     .select('article_id')
@@ -114,7 +107,6 @@ const updateInsightCentroid = async (insightId) => {
 
   const articleIds = members.map(m => m.article_id);
 
-  // Step 3 — pull those articles' chunk vectors from the main collection
   const points = await qdrantClient.scroll(POLICY_COLLECTION, {
     filter: {
       must: [{ key: 'article_id', match: { any: articleIds } }],
@@ -129,7 +121,6 @@ const updateInsightCentroid = async (insightId) => {
     return;
   }
 
-  // Step 4 — average all chunk vectors into one centroid
   const vectors = points.points.map(p => p.vector);
   const dim = vectors[0].length;
   const centroid = new Array(dim).fill(0);
@@ -139,8 +130,6 @@ const updateInsightCentroid = async (insightId) => {
   }
   for (let i = 0; i < dim; i++) centroid[i] /= vectors.length;
 
-  // Step 5 — reuse the existing centroid point ID if this card already has
-  // one, otherwise generate a new one and save it back onto the card row
   const { v4: uuidv4 } = require('uuid');
   const centroidPointId = insight.centroid_point_id || uuidv4();
 
@@ -168,12 +157,6 @@ const updateInsightCentroid = async (insightId) => {
   console.log(`  [Centroid] Updated centroid for insight ${insightId}`);
 };
 
-// ── Delete a card's centroid ──────────────────────────────────────────────
-// Call this any time a market_insights row is deleted (test cleanup, admin
-// action, future dedup fixes, etc.) so Qdrant never drifts out of sync with
-// Supabase again. Mirrors updateInsightCentroid's lookup pattern, but for
-// removal instead of upsert. IMPORTANT: call this BEFORE deleting the
-// market_insights row, since it needs to read centroid_point_id from it.
 const deleteInsightCentroid = async (insightId) => {
   const { data: insight, error } = await supabase
     .from('market_insights')
@@ -193,15 +176,9 @@ const deleteInsightCentroid = async (insightId) => {
   console.log(`  [Centroid] Deleted centroid for insight ${insightId}`);
 };
 
-// ── Find similar market insight cards ────────────────────────────────────────
-// Mirrors findSimilarTrends() in trendClustering.js. Given one card's ID,
-// finds its centroid and searches for other cards whose centroids are
-// semantically close — used for the "Similar Market Movements" section
-// on a card's detail view in the frontend.
-const SIMILAR_INSIGHTS_LIMIT = 3; // how many related cards to surface per card
+const SIMILAR_INSIGHTS_LIMIT = 3;
 
 const findSimilarInsights = async (insightId) => {
-  // Step 1 — get this card's own metadata + centroid point ID
   const { data: insight, error } = await supabase
     .from('market_insights')
     .select('client_id, module_id, submodule_id, centroid_point_id')
@@ -213,7 +190,6 @@ const findSimilarInsights = async (insightId) => {
     return [];
   }
 
-  // industry isn't stored on market_insights — same lookup as updateInsightCentroid
   const { data: clientRow, error: clientError } = await supabase
     .schema('admin')
     .from('clients')
@@ -227,7 +203,6 @@ const findSimilarInsights = async (insightId) => {
   }
   const industry = clientRow.industry;
 
-  // Step 2 — fetch that centroid's actual vector from Qdrant
   const points = await qdrantClient.retrieve(INSIGHT_CENTROID_COLLECTION, {
     ids: [insight.centroid_point_id],
     with_vector: true,
@@ -240,7 +215,6 @@ const findSimilarInsights = async (insightId) => {
 
   const ownVector = points[0].vector;
 
-  // Step 3 — search for other centroids close to this one, excluding itself
   const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
     vector: ownVector,
     filter: {
@@ -250,7 +224,7 @@ const findSimilarInsights = async (insightId) => {
         { key: 'industry', match: { value: industry } },
       ],
     },
-    limit: SIMILAR_INSIGHTS_LIMIT + 1, // +1 since it'll match itself first
+    limit: SIMILAR_INSIGHTS_LIMIT + 1,
     with_payload: true,
   });
 
@@ -264,7 +238,6 @@ const findSimilarInsights = async (insightId) => {
     return [];
   }
 
-  // Step 4 — get the actual titles for those card IDs
   const { data: relatedInsights } = await supabase
     .from('market_insights')
     .select('id, title')
@@ -293,9 +266,6 @@ const getDimensionName = async (submoduleId) => {
   return data?.submodule_name || null;
 };
 
-// Repairs common LLM JSON formatting issues before parsing (small models
-// occasionally return slightly malformed JSON — stray commas, unescaped
-// quotes, truncated output). Local copy, not shared with trendClustering.js.
 const repairAndParseJson = (rawContent) => {
   let cleaned = rawContent.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
 
@@ -347,8 +317,6 @@ const repairAndParseJson = (rawContent) => {
   }
 };
 
-// Deterministic — never asked from the LLM. Strategic Relevance is
-// confidence based on how many corroborating signals back this card.
 const calculateRelevanceLevel = (signalCount) => {
   if (signalCount >= 7) return 'Critical';
   if (signalCount >= 4) return 'High';
@@ -356,49 +324,13 @@ const calculateRelevanceLevel = (signalCount) => {
   return 'Low';
 };
 
-// Step 1 — find the most similar EXISTING card, if any crosses the
-// similarity threshold. CHANGED: now compares against each card's
-// STABLE stored centroid in market_insights_centroids via one Qdrant
-// search, instead of re-embedding title+summary live for every
-// candidate every time (title/summary text shifts on every rewrite,
-// which made scores unstable). Also no longer hard-filtered to the
-// same signal_id — searches by submodule instead, so two articles
-// about the same real event classified under slightly different
-// signals can still find each other.
-const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbedding, organization) => {
-  // Priority 1 — if this organization already has a card in scope, always
-  // use it. Checked BEFORE embedding search so a same-company signal can
-  // never get hijacked by an unrelated card that happens to score higher
-  // on shared boilerplate wording.
-  if (organization && organization !== 'Unknown') {
-    const { data: orgSignal } = await supabase
-      .from('market_dynamics_signals')
-      .select('insight_id')
-      .eq('client_id', clientId)
-      .eq('module_id', moduleId)
-      .eq('submodule_id', submoduleId)
-      .eq('organization', organization)
-      .not('insight_id', 'is', null)
-      .order('published_date', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (orgSignal && orgSignal.insight_id) {
-      const { data: card } = await supabase
-        .from('market_insights')
-        .select('*')
-        .eq('id', orgSignal.insight_id)
-        .single();
-      if (card) {
-        console.log(`  [CardMatch] Org match for "${organization}" -> card ${card.id}`);
-        return card;
-      }
-    }
-  }
-
-  // Priority 2 — no card for this organization yet: fall back to
-  // embedding similarity, which is what lets different companies with a
-  // shared theme still land on one card together.
+// ── Find the most similar EXISTING card, if any crosses the similarity
+// threshold. PURE topic/embedding matching — no organization logic at
+// all. This means: two articles merge into one card purely based on
+// how similar their content is, regardless of which company(ies) they
+// mention. That's the "group similar topics together" behavior you
+// asked for.
+const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbedding) => {
   const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
     vector: articleEmbedding,
     filter: {
@@ -437,17 +369,14 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbed
   return card || null;
 };
 
-// Step 2 — ask the LLM to write (or rewrite) the card.
-// existingCard is null on first creation.
-// Strips markdown bold and a leaked "Title:" prefix the model sometimes
-// includes inside the JSON value itself (seen with gpt-oss-20b).
 const cleanText = (text) => {
   if (!text) return text;
   return text
-    .replace(/^\*+/, '').replace(/\*+$/, '')  // strip leading/trailing *'s
-    .replace(/^title:\s*/i, '')                // strip leaked "Title:" prefix
+    .replace(/^\*+/, '').replace(/\*+$/, '')
+    .replace(/^title:\s*/i, '')
     .trim();
 };
+
 const generateInsightWriteup = async (existingCard, newArticleText, industry) => {
   const { data: promptRow, error } = await supabase
     .from('prompts')
@@ -495,11 +424,12 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
   };
 };
 
-// Step 3 — the main entry point. Called once per relevant Market Dynamics article.
-const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry, organization) => {
-  await setupInsightCentroidCollection(); // NEW — ensures submodule_id index exists before we search on it
+// Main entry point — called once per relevant Market Dynamics article.
+// No organization parameter — pure topic matching.
+const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry) => {
+  await setupInsightCentroidCollection();
   const articleEmbedding = await embedText((articleText || '').slice(0, 4000));
-  const existing = await findExistingInsight(clientId, moduleId, submoduleId, articleEmbedding, organization);
+  const existing = await findExistingInsight(clientId, moduleId, submoduleId, articleEmbedding);
 
   const writeup = await generateInsightWriteup(existing, articleText, industry);
   const category = await getDimensionName(submoduleId);

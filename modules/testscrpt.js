@@ -6,7 +6,7 @@
 
 const { pipeline } = require('@xenova/transformers');
 
-const CARD_SIMILARITY_THRESHOLD = 0.68;
+const CARD_SIMILARITY_THRESHOLD = 0.78;
 
 let embedderPromise = null;
 const getEmbedder = () => {
@@ -155,31 +155,26 @@ console.log(`Total signals to process: ${ordered.length}\n`);
     const bucket = (cardsBySubmodule[sig.submodule] ||= []);
     const orgKey = `${sig.submodule}::${sig.organization}`;
 
-    // top-1 embedding match, same as qdrant limit:1 search (still computed
-    // for logging even when org match wins)
+    // top-1 embedding match, same as qdrant limit:1 search
     let best = null;
     for (const card of bucket) {
-      const s = cosineSimilarity(vec, card.centroid);
-      if (!best || s > best.score) best = { card, score: s };
+      const score = cosineSimilarity(vec, card.centroid);
+      if (!best || score > best.score) best = { card, score };
     }
 
     let chosen = null;
     let matchType = null;
+    let score = best ? best.score : null;
 
-    // Priority 1 — organization match wins outright, checked BEFORE
-    // embedding. Matches the real findExistingInsight's order.
-    if (sig.organization && orgLastCard[orgKey]) {
-      chosen = orgLastCard[orgKey];
-      matchType = 'org-first';
-    } else if (best && best.score >= CARD_SIMILARITY_THRESHOLD) {
+    if (best && best.score >= CARD_SIMILARITY_THRESHOLD) {
       chosen = best.card;
       matchType = 'embedding';
     }
-
-    const score = best ? best.score : null;
+    // no org-fallback — pure embedding matching, matches current real code
 
     if (chosen) {
       chosen.members.push({ title: sig.title, group: sig.group, organization: sig.organization, vec });
+      // matches current real code: centroid = average of ALL members, no freeze
       chosen.centroid = mean(chosen.members.map(m => m.vec));
       log.push({ title: sig.title, group: sig.group, org: sig.organization, action: 'MERGED', cardId: chosen.id, score, matchType });
     } else {
