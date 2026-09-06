@@ -25,15 +25,22 @@ const embedText = async (text) => {
   return Array.from(output.data);
 };
 
-// RAISED from 0.68 -> 0.78. This is the single lever that controls
-// "how similar do two articles need to be before they're treated as
-// the same topic". Too low and boilerplate-y phrasing (e.g. two
-// different companies' funding announcements that both say "closed a
-// $X million Series A led by Y") merges when it shouldn't. Too high
-// and genuinely related articles about the same topic stop merging.
-// Tune this ONE number if you see either problem in real usage —
-// don't reintroduce org/company logic to compensate.
-const CARD_SIMILARITY_THRESHOLD = 0.70;
+const cosineSimilarity = (a, b) => {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+};
+
+// Used ONLY for cross-company topic matching (different org, same signal).
+// Deliberately strict -- this is what stops "same sentence template,
+// different company" false merges. Same-company matching below never uses
+// this at all, so it can never block a same-company merge.
+const CARD_SIMILARITY_THRESHOLD = 0.82;
+
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const setupInsightCentroidCollection = async () => {
@@ -63,10 +70,10 @@ const setupInsightCentroidCollection = async () => {
 };
 
 // ── Compute and store a card's centroid ──────────────────────────────────────
-// Averages the embeddings of every article currently linked to this card
-// via market_insight_members, and upserts that average vector as the
-// card's centroid. This is the ONLY thing that defines "what topic is
-// this card about" — no company/org logic anywhere in this file.
+// FROZEN: only the first 3 founding members (by join order) ever contribute
+// to the centroid. This stops the centroid drifting toward a generic
+// "topic average" as a card grows, which was making blobs easier to join
+// the more members they already had.
 const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
 
 const updateInsightCentroid = async (insightId) => {
@@ -326,13 +333,50 @@ const calculateRelevanceLevel = (signalCount) => {
   return 'Low';
 };
 
-// ── Find the most similar EXISTING card, if any crosses the similarity
-// threshold. PURE topic/embedding matching — no organization logic at
-// all. This means: two articles merge into one card purely based on
-// how similar their content is, regardless of which company(ies) they
-// mention. That's the "group similar topics together" behavior you
-// asked for.
-const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbedding) => {
+// ── Find the most similar EXISTING card ──────────────────────────────────
+// TWO-TIER matching:
+//
+// TIER 1 — SAME COMPANY (deterministic, no embedding, always correct):
+// If this article's organization already has an active card in this exact
+// client/module/submodule scope, always reuse that card. A company's own
+// signals should never split apart just because the LLM phrased two
+// articles differently -- this guarantees they never do.
+//
+// TIER 2 — SAME SIGNAL, different company (topic clustering):
+// Only runs if Tier 1 found nothing. Restricts candidates to cards that
+// share the SAME signal_id (not just the same submodule -- submodule is
+// too broad and was letting unrelated signal types collide). Requires a
+// STRICT similarity score (see CARD_SIMILARITY_THRESHOLD) since this is
+// where "same sentence template, different company" false merges happen.
+const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, articleEmbedding, organization) => {
+  // TIER 1 — exact organization match
+  if (organization && organization !== 'Unknown') {
+    const { data: orgSignal } = await supabase
+      .from('market_dynamics_signals')
+      .select('insight_id')
+      .eq('client_id', clientId)
+      .eq('module_id', moduleId)
+      .eq('submodule_id', submoduleId)
+      .eq('organization', organization)
+      .not('insight_id', 'is', null)
+      .order('published_date', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (orgSignal && orgSignal.insight_id) {
+      const { data: card } = await supabase
+        .from('market_insights')
+        .select('*')
+        .eq('id', orgSignal.insight_id)
+        .single();
+      if (card) {
+        console.log(`  [CardMatch] TIER1 org match for "${organization}" -> card ${card.id}`);
+        return card;
+      }
+    }
+  }
+
+  // TIER 2 — same signal, embedding similarity, strict threshold
   const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
     vector: articleEmbedding,
     filter: {
@@ -342,33 +386,41 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbed
         { key: 'submodule_id', match: { value: submoduleId } },
       ],
     },
-    limit: 1,
+    limit: 5,
     with_payload: true,
   });
 
-  const bestMatch = searchResult[0];
-
-  if (!bestMatch) {
-    console.log(`  [CardMatch] No existing cards to compare against yet`);
+  if (searchResult.length === 0) {
+    console.log(`  [CardMatch] TIER2 no existing cards to compare against yet`);
     return null;
   }
 
-  const { count: memberCount } = await supabase
-    .from('market_insight_members')
-    .select('*', { count: 'exact', head: true })
-    .eq('insight_id', bestMatch.payload.insight_id);
+  for (const candidate of searchResult) {
+    if (candidate.score < CARD_SIMILARITY_THRESHOLD) break;
 
-  console.log(`  [CardMatch] score=${bestMatch.score.toFixed(3)} threshold=${CARD_SIMILARITY_THRESHOLD} card=${bestMatch.payload.insight_id} existing_members=${memberCount}`);
+    // require same signal_id -- narrows the pool so unrelated signal types
+    // in the same submodule can't collide on shared boilerplate phrasing
+    const { data: candSignal } = await supabase
+      .from('market_dynamics_signals')
+      .select('signal_id')
+      .eq('insight_id', candidate.payload.insight_id)
+      .limit(1)
+      .maybeSingle();
 
-  if (bestMatch.score < CARD_SIMILARITY_THRESHOLD) return null;
+    if (!candSignal || candSignal.signal_id !== signalId) continue;
 
-  const { data: card } = await supabase
-    .from('market_insights')
-    .select('*')
-    .eq('id', bestMatch.payload.insight_id)
-    .single();
+    console.log(`  [CardMatch] TIER2 score=${candidate.score.toFixed(3)} threshold=${CARD_SIMILARITY_THRESHOLD} card=${candidate.payload.insight_id} signal match confirmed`);
 
-  return card || null;
+    const { data: card } = await supabase
+      .from('market_insights')
+      .select('*')
+      .eq('id', candidate.payload.insight_id)
+      .single();
+    if (card) return card;
+  }
+
+  console.log(`  [CardMatch] No match in either tier — creating new card`);
+  return null;
 };
 
 const cleanText = (text) => {
@@ -427,11 +479,10 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
 };
 
 // Main entry point — called once per relevant Market Dynamics article.
-// No organization parameter — pure topic matching.
-const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry) => {
+const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry, organization) => {
   await setupInsightCentroidCollection();
   const articleEmbedding = await embedText((articleText || '').slice(0, 4000));
-  const existing = await findExistingInsight(clientId, moduleId, submoduleId, articleEmbedding);
+  const existing = await findExistingInsight(clientId, moduleId, submoduleId, signalId, articleEmbedding, organization);
 
   const writeup = await generateInsightWriteup(existing, articleText, industry);
   const category = await getDimensionName(submoduleId);

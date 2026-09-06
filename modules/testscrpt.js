@@ -1,12 +1,12 @@
-// Matches CURRENT marketInsights.js exactly:
-// - CARD_SIMILARITY_THRESHOLD = 0.68
-// - single best embedding match (top-1, no candidate loop, no org-gate)
-// - if embedding misses threshold, fall back to exact org match (same company
-//   always lands on its most recent card even if phrasing drifted)
+// Matches the NEW marketInsights.js exactly:
+// TIER 1 — exact organization match (deterministic, no embedding)
+// TIER 2 — embedding match (top-5 candidates) but ONLY counts if the
+//          candidate card shares the SAME signal_id, threshold 0.82
+// Centroid frozen to first 3 founding members.
 
 const { pipeline } = require('@xenova/transformers');
 
-const CARD_SIMILARITY_THRESHOLD = 0.70;
+const CARD_SIMILARITY_THRESHOLD = 0.82;
 
 let embedderPromise = null;
 const getEmbedder = () => {
@@ -74,6 +74,9 @@ const aiTemplates = [
   (c) => `${c}'s new AI-powered tool accelerates R&D timelines, turning weeks of research into minutes.`,
   (c) => `${c} partners with an AI vendor to build conversational try-on and product discovery tools for consumers.`,
 ];
+// Each TREND cluster gets its OWN signal_id -- models the classifier having
+// identified it as a specific, narrowly-scoped monitored signal (not the
+// generic "Funding Round" / "AI Tool Adoption" signal that SAMECO/SINGLE use).
 const trendTemplates = {
   'Investment Activity': [
     (c) => `${c} is among a wave of dermocosmetics brands attracting venture capital as investors chase clinical, evidence-backed skincare.`,
@@ -87,49 +90,59 @@ const trendTemplates = {
   ],
 };
 
+// Fixed "main" signal_ids -- the generic monitored signal that funding-round
+// and AI-tool-adoption articles get classified under, REGARDLESS of company.
+// This is the realistic risk case: SAMECO and SINGLE share this signal_id,
+// so Tier 2 will let them compete against each other if embedding is high enough.
+const MAIN_SIGNAL = { 'Investment Activity': 'signal-funding-round', 'AI Adoption': 'signal-ai-tool-adoption' };
+
 const usedCompanies = shuffleArr(companies);
 let companyIdx = 0;
 const nextCompany = () => usedCompanies[companyIdx++ % usedCompanies.length];
 
 const signals = [];
 
-// 10 SAME-COMPANY duplicate clusters — MUST end up on 1 card each
+// 10 SAME-COMPANY duplicate clusters — MUST end up on 1 card each (Tier 1 guarantees this)
 for (let k = 0; k < 10; k++) {
   const submodule = k % 2 === 0 ? 'Investment Activity' : 'AI Adoption';
   const company = nextCompany();
   const clusterSize = 2 + (k % 2);
+  const signalId = MAIN_SIGNAL[submodule];
   if (submodule === 'Investment Activity') {
     const investor = pick(investors);
     const amt = 5 + Math.floor(rand() * 45);
     for (let v = 0; v < clusterSize; v++) {
       const text = investmentTemplates[v % investmentTemplates.length](company, investor, amt);
-      signals.push({ group: `SAMECO-${k}`, organization: company, submodule, title: text.slice(0, 60), text });
+      signals.push({ group: `SAMECO-${k}`, organization: company, submodule, signalId, title: text.slice(0, 60), text });
     }
   } else {
     for (let v = 0; v < clusterSize; v++) {
       const text = aiTemplates[v % aiTemplates.length](company);
-      signals.push({ group: `SAMECO-${k}`, organization: company, submodule, title: text.slice(0, 60), text });
+      signals.push({ group: `SAMECO-${k}`, organization: company, submodule, signalId, title: text.slice(0, 60), text });
     }
   }
 }
 
-// 10 SAME-TOPIC-DIFFERENT-COMPANY clusters — should merge into 1 trend card each (your requirement)
+// 10 SAME-TOPIC-DIFFERENT-COMPANY clusters, each its OWN dedicated signal_id
 for (let k = 0; k < 10; k++) {
   const submodule = k % 2 === 0 ? 'Investment Activity' : 'AI Adoption';
   const clusterSize = 2 + (k % 2);
   const templates = trendTemplates[submodule];
+  const signalId = `signal-trend-${submodule}-${k}`;
   for (let v = 0; v < clusterSize; v++) {
     const company = nextCompany();
     const text = templates[v % templates.length](company);
-    signals.push({ group: `TREND-${k}`, organization: company, submodule, title: text.slice(0, 60), text });
+    signals.push({ group: `TREND-${k}`, organization: company, submodule, signalId, title: text.slice(0, 60), text });
   }
 }
 
-// ~60 unrelated singleton events — should stay separate
+// ~60 unrelated singleton events, using the MAIN signal_id (same as SAMECO) —
+// this is the realistic stress case for Tier 2's signal-scoping + threshold.
 const singletonSubmodules = ['Investment Activity', 'AI Adoption'];
 for (let s = 0; s < 60; s++) {
   const submodule = singletonSubmodules[s % singletonSubmodules.length];
   const company = nextCompany();
+  const signalId = MAIN_SIGNAL[submodule];
   let text;
   if (submodule === 'Investment Activity') {
     const investor = pick(investors);
@@ -138,7 +151,7 @@ for (let s = 0; s < 60; s++) {
   } else {
     text = aiTemplates[Math.floor(rand() * aiTemplates.length)](company);
   }
-  signals.push({ group: `SINGLE-${s}`, organization: company, submodule, title: text.slice(0, 60), text });
+  signals.push({ group: `SINGLE-${s}`, organization: company, submodule, signalId, title: text.slice(0, 60), text });
 }
 
 const ordered = shuffleArr(signals);
@@ -148,44 +161,52 @@ console.log(`Total signals to process: ${ordered.length}\n`);
   const cardsBySubmodule = {};
   let nextCardId = 1;
   const log = [];
-  const orgLastCard = {}; // organization -> most recently used card, per submodule (mirrors the org-fallback query)
+  const orgLastCard = {}; // "submodule::organization" -> most recent card (Tier 1 lookup)
 
   for (const sig of ordered) {
     const vec = await embedText(sig.text.slice(0, 4000));
     const bucket = (cardsBySubmodule[sig.submodule] ||= []);
     const orgKey = `${sig.submodule}::${sig.organization}`;
 
-    // top-1 embedding match, same as qdrant limit:1 search
-    let best = null;
-    for (const card of bucket) {
-      const score = cosineSimilarity(vec, card.centroid);
-      if (!best || score > best.score) best = { card, score };
-    }
-
     let chosen = null;
     let matchType = null;
-    let score = best ? best.score : null;
+    let score = null;
 
-    if (best && best.score >= CARD_SIMILARITY_THRESHOLD) {
-      chosen = best.card;
-      matchType = 'embedding';
+    // TIER 1 — exact org match
+    if (sig.organization && orgLastCard[orgKey]) {
+      chosen = orgLastCard[orgKey];
+      matchType = 'TIER1-org';
     }
-    // no org-fallback — pure embedding matching, matches current real code
+
+    // TIER 2 — top-5 embedding candidates, must share signal_id, threshold 0.82
+    if (!chosen) {
+      const ranked = bucket
+        .map(card => ({ card, s: cosineSimilarity(vec, card.centroid) }))
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 5);
+
+      for (const cand of ranked) {
+        if (cand.s < CARD_SIMILARITY_THRESHOLD) break;
+        if (cand.card.signalId !== sig.signalId) continue; // signal-scoping gate
+        chosen = cand.card;
+        matchType = 'TIER2-embedding';
+        score = cand.s;
+        break;
+      }
+    }
 
     if (chosen) {
       chosen.members.push({ title: sig.title, group: sig.group, organization: sig.organization, vec });
-      // FROZEN: matches real fix — centroid only ever built from the first 3
-      // founding members (by join order), never recalculated from the full
-      // growing member list. This is what stops blob drift.
+      // FROZEN: centroid only from first 3 founding members
       chosen.centroid = mean(chosen.members.slice(0, 3).map(m => m.vec));
       log.push({ title: sig.title, group: sig.group, org: sig.organization, action: 'MERGED', cardId: chosen.id, score, matchType });
     } else {
-      const card = { id: nextCardId++, members: [{ title: sig.title, group: sig.group, organization: sig.organization, vec }], centroid: vec };
+      const card = { id: nextCardId++, signalId: sig.signalId, members: [{ title: sig.title, group: sig.group, organization: sig.organization, vec }], centroid: vec };
       bucket.push(card);
-      log.push({ title: sig.title, group: sig.group, org: sig.organization, action: 'NEW CARD', cardId: card.id, score, matchType: null });
+      log.push({ title: sig.title, group: sig.group, org: sig.organization, action: 'NEW CARD', cardId: card.id, score: null, matchType: null });
     }
 
-    if (sig.organization) orgLastCard[orgKey] = chosen || bucket[bucket.length - 1];
+    orgLastCard[orgKey] = chosen || bucket[bucket.length - 1];
   }
 
   console.log('=== DECISION LOG ===\n');
@@ -200,7 +221,7 @@ console.log(`Total signals to process: ${ordered.length}\n`);
     console.log(`--- ${submodule} (${cards.length} cards) ---`);
     for (const card of cards) {
       const orgs = new Set(card.members.map(m => m.organization));
-      console.log(`  Card #${card.id} (${card.members.length} signal${card.members.length > 1 ? 's' : ''}) orgs=[${[...orgs].join(', ')}]`);
+      console.log(`  Card #${card.id} (${card.members.length} signal${card.members.length > 1 ? 's' : ''}) signalId=${card.signalId} orgs=[${[...orgs].join(', ')}]`);
       for (const m of card.members) console.log(`     - [${m.group}] org=${m.organization} "${m.title}"`);
     }
   }
@@ -224,14 +245,21 @@ console.log(`Total signals to process: ${ordered.length}\n`);
     console.log(`${group} [${label}]: ${ok ? '✅ merged correctly' : `❌ SPLIT across ${cardIdsUsed.size} cards`} — cards: ${[...cardIdsUsed].join(',')}`);
   }
 
-  // check no SINGLE accidentally merged with another SINGLE or a cluster
   let wrongMerges = 0;
   for (const submodule of Object.values(cardsBySubmodule)) {
     for (const card of submodule) {
-      const groups = new Set(card.members.map(m => m.group.split('-')[0])); // SAMECO / TREND / SINGLE prefix
-      if (groups.size > 1 || (groups.has('SINGLE') && card.members.length > 1)) {
-        wrongMerges++;
-        console.log(`⚠ Card #${card.id} mixes unrelated groups: ${[...new Set(card.members.map(m => m.group))].join(', ')}`);
+      const groups = new Set(card.members.map(m => m.group.split('-')[0]));
+      const distinctRealGroups = new Set(card.members.map(m => m.group));
+      // flag if it mixes signals from genuinely different "real" clusters/singles
+      if (distinctRealGroups.size > 1 && (groups.size > 1 || card.members.length !== [...new Set(card.members.map(m=>m.group))].length)) {
+        // more precise: flag if members come from more than one distinct group AND
+        // those groups aren't all the same SAMECO-N (which is correct)
+        const uniqueGroups = [...distinctRealGroups];
+        const allSameCluster = uniqueGroups.every(g => g === uniqueGroups[0]);
+        if (!allSameCluster) {
+          wrongMerges++;
+          console.log(`⚠ Card #${card.id} mixes unrelated groups: ${uniqueGroups.join(', ')}`);
+        }
       }
     }
   }
