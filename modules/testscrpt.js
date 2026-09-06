@@ -6,7 +6,7 @@
 
 const { pipeline } = require('@xenova/transformers');
 
-const CARD_SIMILARITY_THRESHOLD = 0.82;
+const CARD_SIMILARITY_THRESHOLD = 0.90;
 
 let embedderPromise = null;
 const getEmbedder = () => {
