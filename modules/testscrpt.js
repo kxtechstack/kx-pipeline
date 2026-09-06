@@ -155,24 +155,28 @@ console.log(`Total signals to process: ${ordered.length}\n`);
     const bucket = (cardsBySubmodule[sig.submodule] ||= []);
     const orgKey = `${sig.submodule}::${sig.organization}`;
 
-    // top-1 embedding match, same as qdrant limit:1 search
+    // top-1 embedding match, same as qdrant limit:1 search (still computed
+    // for logging even when org match wins)
     let best = null;
     for (const card of bucket) {
-      const score = cosineSimilarity(vec, card.centroid);
-      if (!best || score > best.score) best = { card, score };
+      const s = cosineSimilarity(vec, card.centroid);
+      if (!best || s > best.score) best = { card, score: s };
     }
 
     let chosen = null;
     let matchType = null;
-    let score = best ? best.score : null;
 
-    if (best && best.score >= CARD_SIMILARITY_THRESHOLD) {
+    // Priority 1 — organization match wins outright, checked BEFORE
+    // embedding. Matches the real findExistingInsight's order.
+    if (sig.organization && orgLastCard[orgKey]) {
+      chosen = orgLastCard[orgKey];
+      matchType = 'org-first';
+    } else if (best && best.score >= CARD_SIMILARITY_THRESHOLD) {
       chosen = best.card;
       matchType = 'embedding';
-    } else if (sig.organization && orgLastCard[orgKey]) {
-      chosen = orgLastCard[orgKey];
-      matchType = 'org-fallback';
     }
+
+    const score = best ? best.score : null;
 
     if (chosen) {
       chosen.members.push({ title: sig.title, group: sig.group, organization: sig.organization, vec });
