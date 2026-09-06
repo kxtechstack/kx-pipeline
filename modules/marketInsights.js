@@ -358,6 +358,7 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, ar
       .eq('module_id', moduleId)
       .eq('submodule_id', submoduleId)
       .eq('organization', organization)
+      .eq('signal_id', signalId)
       .not('insight_id', 'is', null)
       .order('published_date', { ascending: false })
       .limit(1)
