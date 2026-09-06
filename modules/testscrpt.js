@@ -6,7 +6,7 @@
 
 const { pipeline } = require('@xenova/transformers');
 
-const CARD_SIMILARITY_THRESHOLD = 0.78;
+const CARD_SIMILARITY_THRESHOLD = 0.70;
 
 let embedderPromise = null;
 const getEmbedder = () => {
@@ -174,8 +174,10 @@ console.log(`Total signals to process: ${ordered.length}\n`);
 
     if (chosen) {
       chosen.members.push({ title: sig.title, group: sig.group, organization: sig.organization, vec });
-      // matches current real code: centroid = average of ALL members, no freeze
-      chosen.centroid = mean(chosen.members.map(m => m.vec));
+      // FROZEN: matches real fix — centroid only ever built from the first 3
+      // founding members (by join order), never recalculated from the full
+      // growing member list. This is what stops blob drift.
+      chosen.centroid = mean(chosen.members.slice(0, 3).map(m => m.vec));
       log.push({ title: sig.title, group: sig.group, org: sig.organization, action: 'MERGED', cardId: chosen.id, score, matchType });
     } else {
       const card = { id: nextCardId++, members: [{ title: sig.title, group: sig.group, organization: sig.organization, vec }], centroid: vec };
