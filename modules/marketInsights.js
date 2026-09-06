@@ -33,7 +33,7 @@ const embedText = async (text) => {
 // and genuinely related articles about the same topic stop merging.
 // Tune this ONE number if you see either problem in real usage —
 // don't reintroduce org/company logic to compensate.
-const CARD_SIMILARITY_THRESHOLD = 0.78;
+const CARD_SIMILARITY_THRESHOLD = 0.70;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const setupInsightCentroidCollection = async () => {
@@ -97,8 +97,10 @@ const updateInsightCentroid = async (insightId) => {
 
   const { data: members, error: membersError } = await supabase
     .from('market_insight_members')
-    .select('article_id')
-    .eq('insight_id', insightId);
+    .select('article_id, joined_at')
+    .eq('insight_id', insightId)
+    .order('joined_at', { ascending: true })
+    .limit(3);
 
   if (membersError || !members || members.length === 0) {
     console.log(`  [Centroid] No members found for insight ${insightId}`);
